@@ -1,6 +1,6 @@
 # labgpu: Backend.AI 부분 GPU + 스팟 GPU 대여
 
-연구실 Backend.AI(오픈소스 25.19)에 두 가지 기능을 붙이는 패키지입니다.
+연구실 Backend.AI(오픈소스, 26.8.3 기준)에 두 가지 기능을 붙이는 패키지입니다.
 
 | 기능 | 구성 요소 | 한 줄 설명 |
 |---|---|---|
@@ -14,13 +14,13 @@
 > **상태:** WSL2에서 Backend.AI 26.9 manager·agent를 띄워 종류별 슬롯, 세션 배정, 스팟 대여·회수까지
 > 확인했습니다. **HAMi-core의 실제 메모리 제한은 WSL에서 확인할 수 없어(HAMi-core가 WSL에서 동작하지 않음)
 > 네이티브 Linux GPU 노드에서 먼저 확인해야 합니다.** 자세한 결과는 [SPEC 3.2](docs/SPEC.md#32-실기-검증표).
-> 연구실 서버는 25.19라서 25.19에서의 동작도 아직 확인 전입니다.
+> 연구실 서버는 25.15.6에서 26.8.3으로 올리는 중이라, 실제 서버에서의 동작은 아직 확인 전입니다.
 
 ---
 
 ## 1. 준비물 (GPU 노드마다)
 
-- Backend.AI agent 25.19, Docker + NVIDIA Container Toolkit
+- Backend.AI agent 26.8.3, Docker + NVIDIA Container Toolkit
 - Python 3.12 이상 (agent와 같은 가상환경)
 - **HAMi-core** `libvgpu.so`: 직접 빌드해서 `/opt/labgpu/lib/libvgpu.so`에 둡니다. 노드의 CUDA 툴킷에 맞는
   커밋을 고르세요. HAMi-core 최신판은 CUDA 12.5 이상 헤더가 필요하고, CUDA 12.4라면 `6b92be9`로 빌드됩니다.
