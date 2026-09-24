@@ -1,0 +1,26 @@
+# /etc/labgpu/spot.toml — see docs/SPEC.md section 2.2
+
+[controller]
+poll_interval = 5
+state_dir = "/var/lib/labgpu"
+kill_switch_file = "/etc/labgpu/spot.disabled"
+
+[idle]
+idle_minutes = 30
+owner_util_threshold = 5
+owner_mem_delta_mib = 512
+owner_cpu_threshold = 0.5
+unclaimed_grace_seconds = 60
+
+[reclaim]
+grace_seconds = 30
+mem_reserve_mib = 2048
+
+[spot]
+hook_path = "/opt/labgpu/lib/libvgpu.so"
+allow_unenforced = false
+cpu_shares = 64
+default_ram = "16g"
+host_ram_reserve = "32g"
+allowed_mount_roots = ["/vfroot"]
+max_attempts = 20

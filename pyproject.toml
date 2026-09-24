@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labgpu"
+version = "0.1.0"
+description = "Fractional GPU accelerator plugin and spot GPU lending controller for Backend.AI lab clusters"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "LGPL-3.0-or-later" }
+dependencies = ["nvidia-ml-py>=12"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+labgpu-spot = "labgpu.spot.cli:main"
+
+[project.entry-points.backendai_accelerator_v21]
+cuda_frac = "labgpu.accelerator.cuda_frac:CUDAFracPlugin"
+gpu_slot_1 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin1"
+gpu_slot_2 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin2"
+gpu_slot_3 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin3"
+gpu_slot_4 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin4"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

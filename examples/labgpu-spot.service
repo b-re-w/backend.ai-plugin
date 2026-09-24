@@ -1,0 +1,17 @@
+[Unit]
+Description=labgpu spot GPU lending controller
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/local/bin/labgpu-spot -c /etc/labgpu/spot.toml daemon
+# The controller reclaims lent GPUs on a clean shutdown. If it crashes instead, stop the
+# spot containers here so owners are never left unprotected (SPEC 2.10).
+ExecStopPost=/bin/sh -c 'docker ps -q --filter label=labgpu.spot=1 | xargs -r docker stop -t 30'
+KillMode=mixed
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
