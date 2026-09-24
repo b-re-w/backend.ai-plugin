@@ -67,6 +67,7 @@ T
 
 step "1. owners hold 4 GiB each, idle; submit jobs"
 $FG attach-owners
+$FG xorg-everywhere   # like the lab servers: must not block lending (SPEC 2.1 ignored processes)
 for j in job1 job2 job3; do echo "  submit $j -> $($SPOT submit $SP/jobs/$j.toml)"; done
 echo "  submit bad (mount outside roots) -> $($SPOT submit $SP/jobs/bad.toml 2>&1)"
 

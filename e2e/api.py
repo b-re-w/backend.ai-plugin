@@ -45,7 +45,7 @@ async def rescan(api):
         print(json.dumps((await resp.json()).get("data"), indent=1)[:800])
 
 
-async def start(api, name, slot, amount, cmd="sleep 3600"):
+async def start(api, name, slot, amount, cmd="sleep infinity"):
     s = await api.ComputeSession.get_or_create(
         IMAGE,
         name=name,

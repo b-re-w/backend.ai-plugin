@@ -38,9 +38,12 @@ match cmd:
         by_uuid[sys.argv[3]]["processes"][0]["sm"] = int(sys.argv[4])
     case "stranger":  # stranger <uuid>: a host process nobody owns
         by_uuid[sys.argv[3]].setdefault("processes", []).append({"pid": 9999, "mem": "1g", "sm": 0})
+    case "xorg-everywhere":  # the lab's servers run /usr/lib/xorg/Xorg on every GPU
+        for i, g in enumerate(data["gpus"]):
+            g.setdefault("processes", []).append({"pid": 900 + i, "mem": "200m", "sm": 1, "name": "Xorg"})
     case "clear-stranger":
         for g in data["gpus"]:
             g["processes"] = [p for p in g.get("processes", []) if p["pid"] != 9999]
 path.write_text(json.dumps(data, indent=1))
-print(cmd, {g["uuid"]: [(p["pid"], p.get("sm"), (p.get("container") or "-")[:12]) for p in g.get("processes", [])]
+print(cmd, {g["uuid"]: [(p["pid"], p.get("sm"), (p.get("container") or p.get("name") or "-")[:12]) for p in g.get("processes", [])]
              for g in data["gpus"]})
