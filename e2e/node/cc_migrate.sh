@@ -2,19 +2,21 @@
 # One-off experiment on a native GPU node (not part of Backend.AI): can cuda-checkpoint pause a
 # running PyTorch process, free its GPU memory, and resume it on another GPU of the same model?
 #
-#   e2e/node/cc_migrate.sh --cc ~/cc-test/cuda-checkpoint --python /path/to/python --from 0 --to 1
+#   e2e/node/setup_venv.sh            # once: <repo>/.venv with torch and cuda-checkpoint
+#   e2e/node/cc_migrate.sh --from 0 --to 1
 #
-# Needs driver >= 580, two idle GPUs, and a python with torch. Nothing is installed or changed;
-# the training process is killed on exit. Results go to stdout and to $out (default ./cc-result).
+# Needs driver >= 580 and two idle GPUs. Nothing is installed or changed; the training process is
+# killed on exit. Results go to stdout and to $out (default <repo>/.venv/cc-result).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-cc=/opt/labgpu/bin/cuda-checkpoint
-python=python3
+venv=$(cd "$here/../.." && pwd)/.venv
+cc=$venv/bin/cuda-checkpoint
+python=$venv/bin/python
 from=0
 to=1
 hold_gb=8
-out=./cc-result
+out=$venv/cc-result
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cc) cc="$2"; shift 2 ;;
@@ -23,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     --to) to="$2"; shift 2 ;;
     --hold-gb) hold_gb="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

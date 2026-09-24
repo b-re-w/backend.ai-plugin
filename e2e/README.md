@@ -46,8 +46,9 @@ labgpu 플러그인과 스팟 컨트롤러를 실제로 돌려 보는 스크립�
 
 ## 네이티브 GPU 노드 실험 (`e2e/node/`)
 
-WSL이 아닌 실제 연구실 노드에서 돌리는 일회성 실험입니다. Backend.AI를 건드리지 않습니다.
+WSL이 아닌 실제 연구실 노드에서 돌리는 일회성 실험입니다. Backend.AI를 건드리지 않습니다. 실험 중에는 대상 GPU 두 장에 세션이 배정되지 않도록 주의하세요.
 
 | 스크립트 | 내용 |
 |---|---|
-| `cc_migrate.sh` | `cuda-checkpoint`로 학습 프로세스를 같은 GPU에서 멈췄다 재개하고, 다른 GPU로 옮겨 이어지는지 확인 (`cc_train.py` 사용). 먼저 `scripts/install_cuda_checkpoint.sh --prefix ~/cc-test`로 도구를 받습니다. |
+| `setup_venv.sh` | 한 번만 실행. 레포 안 `.venv`(git 무시)에 torch(CUDA 12.8)와 `cuda-checkpoint`를 설치합니다. 레포 밖에는 아무것도 만들지 않고 root도 필요 없습니다. |
+| `cc_migrate.sh --from 0 --to 1` | `cuda-checkpoint`로 학습 프로세스를 같은 GPU에서 멈췄다 재개하고, 다른 GPU로 옮겨 이어지는지 확인 (`cc_train.py` 사용). 결과는 `.venv/cc-result/`. |
