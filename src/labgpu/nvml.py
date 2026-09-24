@@ -34,6 +34,7 @@ class GpuProcess:
     pid: int
     used_memory: int
     sm_util: int  # percent, max over samples since the previous read; 0 if unsampled
+    name: str = ""  # /proc/<pid>/comm, "" if unknown
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class NvmlReader:
                 pid=p.pid,
                 used_memory=int(p.usedGpuMemory or 0),
                 sm_util=sm_by_pid.get(p.pid, 0),
+                name=procmap.process_name(p.pid),
             )
             for p in procs
         )
@@ -177,7 +179,9 @@ class FakeNvmlReader:
         if g.get("fail"):
             raise NvmlError(f"GPU {index}: simulated failure")
         procs = tuple(
-            GpuProcess(int(p["pid"]), parse_size(p.get("mem", 0)), int(p.get("sm", 0)))
+            GpuProcess(
+                int(p["pid"]), parse_size(p.get("mem", 0)), int(p.get("sm", 0)), str(p.get("name", ""))
+            )
             for p in g.get("processes", [])
         )
         used = parse_size(g["used"]) if "used" in g else sum(p.used_memory for p in procs)

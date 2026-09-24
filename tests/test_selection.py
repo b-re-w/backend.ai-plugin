@@ -16,7 +16,8 @@ PRIMARY = {
         {"uuid": "GPU-p5000-72", "name": "NVIDIA RTX PRO 5000 Blackwell", "memory": "72g"},
         {"uuid": "GPU-p6000-1", "name": "NVIDIA RTX PRO 6000 Blackwell", "memory": "96g"},
         {"uuid": "GPU-p6000-2", "name": "NVIDIA RTX PRO 6000 Blackwell", "memory": "96g",
-         "processes": [{"pid": 7, "mem": "4g", "sm": 30, "container": "c" * 64}]},
+         "processes": [{"pid": 7, "mem": "4g", "sm": 30, "container": "c" * 64},
+                       {"pid": 8, "mem": "200m", "name": "Xorg"}]},
         {"uuid": "GPU-a6000", "name": "NVIDIA RTX A6000", "memory": "48g"},
     ],
 }
@@ -60,8 +61,9 @@ def test_fake_reader(tmp_path, monkeypatch):
     gpus = reader.list_gpus()
     assert [g.uuid for g in gpus][:2] == ["GPU-p5000-72", "GPU-p6000-1"]
     snap = reader.snapshot(2)
-    assert snap.used_memory == 4 * GiB and snap.processes[0].sm_util == 30
-    assert reader.container_of_pids([7, 8]) == {7: "c" * 64, 8: None}
+    assert snap.used_memory == 4 * GiB + 200 * 2**20 and snap.processes[0].sm_util == 30
+    assert snap.processes[1].name == "Xorg"
+    assert reader.container_of_pids([7, 8, 9]) == {7: "c" * 64, 8: None, 9: None}
     # The file is re-read on every call so tests can change it live.
     data = json.loads(path.read_text())
     data["gpus"][0]["fail"] = True

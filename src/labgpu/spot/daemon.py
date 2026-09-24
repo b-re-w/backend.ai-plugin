@@ -155,7 +155,15 @@ class Controller:
             ]
         owner_cpu = {o.id: self.cpu.sample(o.id, o.pid, now) for o in owners if o.pid}
         self.cpu.forget_except({o.id for o in owners})
-        return observe(self._gpu_list, self.gpus.snapshot, owners, spots, self.pid_mapper, owner_cpu)
+        return observe(
+            self._gpu_list,
+            self.gpus.snapshot,
+            owners,
+            spots,
+            self.pid_mapper,
+            owner_cpu,
+            ignored_names=self.cfg.idle.ignored_processes,
+        )
 
     def _reconcile(self, spots: list[SpotContainer]) -> None:
         """Close out finished runs and remove spot containers we do not own (SPEC 2.10)."""

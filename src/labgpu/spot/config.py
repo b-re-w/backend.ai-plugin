@@ -26,6 +26,7 @@ class IdleConfig:
     owner_mem_delta_mib: int = 512
     owner_cpu_threshold: float = 0.5
     unclaimed_grace_seconds: float = 60.0
+    ignored_processes: tuple[str, ...] = ("Xorg",)
 
     @property
     def idle_seconds(self) -> float:
@@ -90,10 +91,16 @@ class Config:
         c = {k: Path(v) if k in ("state_dir", "kill_switch_file") else v for k, v in c.items()}
         return cls(
             controller=_build(ControllerConfig, c),
-            idle=_build(IdleConfig, raw.get("idle", {})),
+            idle=_build(IdleConfig, _tuple_field(raw.get("idle", {}), "ignored_processes")),
             reclaim=_build(ReclaimConfig, raw.get("reclaim", {})),
             spot=_build(SpotConfig, s),
         )
+
+
+def _tuple_field(values: dict[str, Any], key: str) -> dict[str, Any]:
+    if key in values:
+        return {**values, key: tuple(str(v) for v in values[key])}
+    return values
 
 
 def _build[T](dc: type[T], values: dict[str, Any]) -> T:

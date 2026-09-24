@@ -288,3 +288,40 @@ def test_config_from_dict():
     assert cfg.spot.allowed_mount_roots == (Path("/data"),)
     with pytest.raises(ValueError):
         Config.from_dict({"idle": {"typo": 1}})
+
+
+# ---- ignored host processes (SPEC 2.1) ----
+
+def test_host_xorg_is_ignored_but_not_inside_a_container():
+    snaps = {
+        0: GpuSnapshot(GPUS[0], 5 * GiB, 1, (
+            GpuProcess(10, 4 * GiB, 0),                 # owner
+            GpuProcess(11, 200 * MiB, 3, name="Xorg"),  # host display server
+        )),
+        1: GpuSnapshot(GPUS[1], GiB, 0, (
+            GpuProcess(30, GiB, 0, name="Xorg"),        # renamed process inside some container
+            GpuProcess(31, 100 * MiB, 0, name="python"),  # unlisted host process
+        )),
+    }
+    owners = [OwnerContainer(OWNER, 100, ("GPU-a",))]
+    pid_map = {10: OWNER, 11: None, 30: "c" * 64, 31: None}
+    a, b = observe(GPUS, snaps.__getitem__, owners, [], lambda pids: pid_map, {},
+                   ignored_names=("Xorg",))
+    assert [p.kind for p in a.processes] == [ProcKind.OWNER, ProcKind.IGNORED]
+    assert not a.has_unknown
+    assert [p.kind for p in b.processes] == [ProcKind.UNKNOWN, ProcKind.UNKNOWN]
+
+
+def test_ignored_processes_config():
+    assert Config().idle.ignored_processes == ("Xorg",)
+    cfg = Config.from_dict({"idle": {"ignored_processes": ["Xorg", "gnome-shell"]}})
+    assert cfg.idle.ignored_processes == ("Xorg", "gnome-shell")
+    assert Config.from_dict({"idle": {"ignored_processes": []}}).idle.ignored_processes == ()
+
+
+def test_process_name(tmp_path):
+    from labgpu.procmap import process_name
+    (tmp_path / "42").mkdir()
+    (tmp_path / "42" / "comm").write_text("Xorg\n")
+    assert process_name(42, tmp_path) == "Xorg"
+    assert process_name(43, tmp_path) == ""

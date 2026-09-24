@@ -208,3 +208,18 @@ def test_launch_failure_marks_job_failed(tmp_path):
     ctl.tick(600)
     rec = store.get(jid)
     assert rec.state is JobState.FAILED and "No such image" in rec.reason
+
+
+def test_host_xorg_does_not_block_or_reclaim_lending(tmp_path):
+    ctl, store, gpus, docker, jid = make(tmp_path)
+    gpus.procs.append(GpuProcess(50, 300 * 2**20, 2, name="Xorg"))  # always-on display server
+    ctl.pid_mapper = lambda pids: {10: OWNER} | {p: None for p in pids if p != 10}
+    ctl.tick(0)
+    ctl.tick(600)
+    assert len(docker.runs) == 1  # lent despite Xorg on the GPU
+    ctl.tick(605)
+    assert docker.stopped == [] and ctl.last_verdicts["GPU-a"].state is GpuState.LENT
+    # An unlisted host process still reclaims, as before.
+    gpus.procs.append(GpuProcess(51, 100 * 2**20, 0, name="python"))
+    ctl.tick(610)
+    assert len(docker.stopped) == 1

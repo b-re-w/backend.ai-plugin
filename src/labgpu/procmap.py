@@ -37,5 +37,13 @@ def container_of_pid(pid: int, proc_root: Path = Path("/proc")) -> str | None:
         return None
 
 
+def process_name(pid: int, proc_root: Path = Path("/proc")) -> str:
+    """The kernel's short process name (/proc/<pid>/comm), or "" if unreadable."""
+    try:
+        return (proc_root / str(pid) / "comm").read_text().strip()
+    except OSError:
+        return ""
+
+
 def map_pids(pids: Iterable[int], proc_root: Path = Path("/proc")) -> dict[int, str | None]:
     return {pid: container_of_pid(pid, proc_root) for pid in pids}

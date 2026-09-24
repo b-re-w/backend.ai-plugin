@@ -10,6 +10,7 @@ class ProcKind(StrEnum):
     OWNER = "owner"
     SPOT = "spot"
     UNKNOWN = "unknown"
+    IGNORED = "ignored"  # host process on the ignore list, e.g. the display server (SPEC 2.1)
 
 
 @dataclass(frozen=True)

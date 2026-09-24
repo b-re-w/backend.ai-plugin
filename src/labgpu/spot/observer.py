@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
 from .docker import OwnerContainer, SpotContainer
@@ -37,8 +37,9 @@ def build_observation(
     all_owner_ids: set[str],
     spot_gpu_by_container: Mapping[str, str | None],
     owner_cpu: Mapping[str, float | None],
+    ignored_names: Collection[str] = (),
 ) -> GpuObservation:
-    """Classify each GPU process as owner, spot, or unknown for this GPU."""
+    """Classify each GPU process as owner, spot, ignored, or unknown for this GPU."""
     uuid = snap.info.uuid
     processes = []
     for p in snap.processes:
@@ -47,6 +48,9 @@ def build_observation(
             kind = ProcKind.SPOT if spot_gpu_by_container[cid] == uuid else ProcKind.UNKNOWN
         elif cid is not None and cid in owners_on_gpu:
             kind = ProcKind.OWNER
+        elif cid is None and p.name and p.name in ignored_names:
+            # Host-only: a container cannot escape by renaming a process (SPEC 2.1).
+            kind = ProcKind.IGNORED
         else:
             # Includes host processes and owner containers using a GPU they were not given.
             kind = ProcKind.UNKNOWN
@@ -76,6 +80,7 @@ def observe(
     spots: Sequence[SpotContainer],
     pid_mapper: Callable[[list[int]], Mapping[int, str | None]],
     owner_cpu: Mapping[str, float | None],
+    ignored_names: Collection[str] = (),
 ) -> list[GpuObservation]:
     owners_by_gpu: dict[str, dict[str, OwnerContainer]] = {g.uuid: {} for g in gpus}
     for o in owners:
@@ -104,6 +109,7 @@ def observe(
                 all_owner_ids=all_owner_ids,
                 spot_gpu_by_container=spot_gpu,
                 owner_cpu=owner_cpu,
+                ignored_names=ignored_names,
             )
         )
     return observations

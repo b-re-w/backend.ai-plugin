@@ -11,6 +11,7 @@ owner_util_threshold = 5
 owner_mem_delta_mib = 512
 owner_cpu_threshold = 0.5
 unclaimed_grace_seconds = 60
+ignored_processes = ["Xorg"]   # host display server on workstation GPUs is not owner activity
 
 [reclaim]
 grace_seconds = 30

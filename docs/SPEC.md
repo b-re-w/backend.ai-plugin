@@ -170,7 +170,8 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 {"driver": "fake",
  "gpus": [{"uuid": "GPU-p6000-1", "name": "NVIDIA RTX PRO 6000", "memory": "96g",
            "used": "0", "util": 0,
-           "processes": [{"pid": 1234, "mem": "4g", "sm": 30, "container": "<64자리 컨테이너 ID>"}]}]}
+           "processes": [{"pid": 1234, "mem": "4g", "sm": 30, "container": "<64자리 컨테이너 ID>"},
+                         {"pid": 900, "mem": "200m", "name": "Xorg"}]}]}
 ```
 
 - 플러그인: `nvidia` 런타임 확인을 건너뛰고, 컨테이너에 GPU를 붙이지 않습니다(`DeviceRequests` 없음).
@@ -189,6 +190,12 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 - **정체불명(unknown) 프로세스**: GPU를 쓰는데 소유자 컨테이너도 스팟도 아닌 프로세스(호스트 프로세스,
   Backend.AI 밖의 컨테이너). **소유자 활동으로 간주**합니다(안전 우선). 스팟 컨테이너의 프로세스라도
   그 스팟이 배정받은 GPU가 아닌 곳에 나타나면 정체불명으로 봅니다.
+- **무시하는 프로세스(ignored)**: 컨테이너 밖(호스트)에서 돌면서 이름이 `ignored_processes`에 있는
+  프로세스. 워크스테이션 GPU에 늘 떠 있는 화면 서버(`/usr/lib/xorg/Xorg`)처럼, 있어도 소유자 활동이
+  아닌 것들입니다. 활동 판정에서 빼고 정체불명으로도 보지 않습니다. 이 프로세스가 쓰는 GPU 메모리는
+  "사용 중"에 이미 들어 있어 빌려줄 양에서 자동으로 빠지고, 크게 늘면 "여유 메모리 부족" 조건으로
+  회수됩니다. 이름은 `/proc/<pid>/comm`으로 비교하며, 컨테이너 안의 프로세스는 이름이 같아도 무시하지
+  않습니다(컨테이너가 이름만 바꿔 빠져나가지 못하게).
 
 ### 2.2 설정 파일 `/etc/labgpu/spot.toml`
 
@@ -204,6 +211,7 @@ owner_util_threshold = 5     # %, 소유자 프로세스 SM 사용률 합이 이
 owner_mem_delta_mib = 512    # 소유자 GPU 메모리가 기준보다 이만큼 늘면 활동
 owner_cpu_threshold = 0.5    # 코어 수, 소유자 컨테이너 CPU 사용량이 넘으면 활동 (0이면 끔)
 unclaimed_grace_seconds = 60 # 아무도 안 붙은 GPU를 빌려주기 전 대기
+ignored_processes = ["Xorg"] # 호스트에서 늘 GPU를 쓰는, 소유자 활동이 아닌 프로세스 이름
 
 [reclaim]
 grace_seconds = 30           # SIGTERM 후 SIGKILL까지
@@ -226,6 +234,7 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 - NVML: UUID, 인덱스, 총/사용 메모리, 실행 중인 compute 프로세스(PID, 사용 메모리),
   프로세스별 SM 사용률 샘플(`nvmlDeviceGetProcessUtilization`, 직전 틱 이후 샘플의 최댓값)
 - PID → 컨테이너 ID: `/proc/<pid>/cgroup`에서 64자리 16진수 ID를 찾습니다.
+- 프로세스 이름: `/proc/<pid>/comm` (무시 목록 비교용).
 - Docker: 실행 중인 소유자 컨테이너와 그 GPU(UUID) 목록. 다음 순서로 찾습니다.
   1. 환경변수 `LABGPU_DEVICE_UUIDS` (cuda_frac 플러그인)
   2. `HostConfig.DeviceRequests[].DeviceIDs` (Driver `nvidia`; `GPU-`로 시작하면 UUID, 아니면 NVML 인덱스)
@@ -430,6 +439,7 @@ readonly = false
 | **26.8.3 WebUI(26.8.1)**: 세션 생성 화면의 AI 가속기 종류 선택지가 PRO6000/PRO5000/A6000으로 나뉘고, 막대 최대값이 종류별로 2/1/1, CPU·메모리 최대값도 실제 서버 크기(21코어, 14.38GB) | 확인 (브라우저 자동 조작) |
 | 26.9.0rc1에서는 세션 생성 화면의 자원 그룹 한도 요청(`accessible_scaling_groups`)이 업스트림 버그로 실패해 막대가 기본값(가속기 16, CPU 64)으로 나옴 | 업스트림 버그(2026-09-15 커밋 `700bc1c1fd`). 26.8.3에는 없음 |
 | etcd `config/resource_slots`에 실제로 없는 가속기(`cuda.device` 등)가 등록되어 있으면 WebUI가 그것을 기본 선택지로 보여 줌 | 확인. 매니저가 시작할 때 넣는 것으로 보여, 운영 시 실제 종류만 남겨야 함(`e2e/prune_slots.sh`) |
+| 호스트 `Xorg`가 모든 GPU에 떠 있어도 빌려주고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg 때문에 회수하지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
 | 25.19에서 위 항목 전부 | UNVERIFIED (연구실은 최신 안정판으로 올릴 예정) |
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
 
