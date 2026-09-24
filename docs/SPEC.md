@@ -1,4 +1,4 @@
-# SPEC — labgpu 동작 명세
+# SPEC: labgpu 동작 명세
 
 > 이 문서가 기준입니다. 코드와 이 문서가 다르면 코드가 버그입니다. 동작을 바꿀 때는 이 문서를 먼저
 > 고칩니다. 배경과 목표는 [INTENT.md](INTENT.md)를 보세요.
@@ -104,10 +104,10 @@ etcd 값은 모두 문자열로 들어오므로 문자열로 파싱합니다.
 
 - `HostConfig.DeviceRequests = [{Driver: "nvidia", DeviceIDs: [<UUID>…], Capabilities: [["utility","compute","video","graphics","display"]]}]`
 - 환경변수 (컨테이너 안에서는 붙은 GPU가 0부터 다시 번호가 매겨지므로 **로컬 인덱스**를 씁니다)
-  - `LABGPU_DEVICE_UUIDS=<UUID>,<UUID>` — 컨트롤러가 소유자 GPU를 알아내는 데 씁니다.
+  - `LABGPU_DEVICE_UUIDS=<UUID>,<UUID>`: 컨트롤러가 소유자 GPU를 알아내는 데 씁니다.
   - fractional 모드에서 제한이 필요한 장치마다 `CUDA_DEVICE_MEMORY_LIMIT_<local_idx>=<MiB>m`
   - `sm_limit=true`이고 제한이 필요한 장치가 있으면 `CUDA_DEVICE_SM_LIMIT=<제한 장치들 중 최댓값>`
-    (HAMi-core는 SM 제한을 전역 값 하나로 받습니다 — 25.19 노드에서 확인 필요)
+    (HAMi-core는 SM 제한을 전역 값 하나로 받습니다. 실제 노드에서 확인 필요)
   - `CUDA_DEVICE_MEMORY_SHARED_CACHE=/tmp/labgpu-vgpu.cache`
 - 할당이 비어 있으면 빈 dict를 돌려줍니다.
 
@@ -123,7 +123,7 @@ etcd 값은 모두 문자열로 들어오므로 문자열로 파싱합니다.
 | `generate_resource_data` | `CUDA_GLOBAL_DEVICE_IDS=<local>:<global>,…`, `CUDA_RESOURCE_VIRTUALIZED=1`(분할 장치가 있을 때) 또는 `0` |
 | `get_attached_devices` | 장치별 `{"device_id", "model_name", "data": {"smp": SM%, "mem": 할당 메모리}}` |
 | `restore_from_container` | 컨테이너의 resource spec에서 현재 모드의 슬롯 할당을 복원 |
-| `gather_node_measures` | `cuda_mem`(bytes), `cuda_util`(%) — 장치별·노드 합계 |
+| `gather_node_measures` | `cuda_mem`(bytes), `cuda_util`(%), 장치별·노드 합계 |
 | `gather_container_measures` | **프로세스 단위로 귀속**합니다. NVML이 보고한 GPU 프로세스의 PID를 `/proc/<pid>/cgroup`으로 컨테이너 ID에 매핑해, 그 컨테이너 프로세스들의 메모리·SM 사용률만 합칩니다. 같은 GPU를 여러 컨테이너(분할 할당, 스팟)가 써도 서로의 사용량이 섞이지 않고, Backend.AI idle checker의 `cuda_util`도 정확해집니다. |
 | `get_metadata` | fractional: `slot_name="cuda.shares"`, 표시 이름 `fGPU`, 소수 둘째 자리. discrete: `cuda.device`, `GPU` |
 
@@ -424,8 +424,8 @@ readonly = false
 | 스팟: pause/resume, 컨트롤러 SIGTERM 시 전부 회수, 허용 루트 밖 마운트 거부, 없는 이미지는 FAILED | 확인 |
 | 스팟 컨테이너에 실제 GPU가 UUID로 붙음 (`--gpus device=<uuid>`) | 확인 (실제 RTX 4050) |
 | Backend.AI 커널 이미지를 `docker run`으로 직접 실행 (`entrypoint = ""`) | 확인 (최소 커널 이미지) |
-| `nvmlDeviceGetProcessUtilization`이 호스트 PID로 프로세스별 SM 사용률을 줌 | UNVERIFIED — WSL은 NVML 프로세스 정보를 주지 않음. 네이티브 노드 필요 |
-| 소유자 CPU 조건(cgroup v2) | UNVERIFIED — Docker Desktop은 컨테이너 PID가 WSL 배포판에 보이지 않음 |
+| `nvmlDeviceGetProcessUtilization`이 호스트 PID로 프로세스별 SM 사용률을 줌 | UNVERIFIED. WSL은 NVML 프로세스 정보를 주지 않음. 네이티브 노드 필요 |
+| 소유자 CPU 조건(cgroup v2) | UNVERIFIED. Docker Desktop은 컨테이너 PID가 WSL 배포판에 보이지 않음 |
 | **26.8.3(최신 안정판)**: 플러그인 로딩, 종류별 슬롯, 종류별 세션 배정과 HAMi-core 환경변수, 전체 테스트 61개 | 확인 (2026-09-24, WSL, 가짜 NVML) |
 | **26.8.3 WebUI(26.8.1)**: 세션 생성 화면의 AI 가속기 종류 선택지가 PRO6000/PRO5000/A6000으로 나뉘고, 막대 최대값이 종류별로 2/1/1, CPU·메모리 최대값도 실제 서버 크기(21코어, 14.38GB) | 확인 (브라우저 자동 조작) |
 | 26.9.0rc1에서는 세션 생성 화면의 자원 그룹 한도 요청(`accessible_scaling_groups`)이 업스트림 버그로 실패해 막대가 기본값(가속기 16, CPU 64)으로 나옴 | 업스트림 버그(2026-09-15 커밋 `700bc1c1fd`). 26.8.3에는 없음 |

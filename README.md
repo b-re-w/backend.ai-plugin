@@ -1,4 +1,4 @@
-# labgpu — Backend.AI 부분 GPU + 스팟 GPU 대여
+# labgpu: Backend.AI 부분 GPU + 스팟 GPU 대여
 
 연구실 Backend.AI(오픈소스 25.19)에 두 가지 기능을 붙이는 패키지입니다.
 
@@ -22,7 +22,7 @@
 
 - Backend.AI agent 25.19, Docker + NVIDIA Container Toolkit
 - Python 3.12 이상 (agent와 같은 가상환경)
-- **HAMi-core** `libvgpu.so` — 직접 빌드해서 `/opt/labgpu/lib/libvgpu.so`에 둡니다. 노드의 CUDA 툴킷에 맞는
+- **HAMi-core** `libvgpu.so`: 직접 빌드해서 `/opt/labgpu/lib/libvgpu.so`에 둡니다. 노드의 CUDA 툴킷에 맞는
   커밋을 고르세요. HAMi-core 최신판은 CUDA 12.5 이상 헤더가 필요하고, CUDA 12.4라면 `6b92be9`로 빌드됩니다.
 
   ```bash

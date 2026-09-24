@@ -1,4 +1,4 @@
-# /etc/labgpu/spot.toml — see docs/SPEC.md section 2.2
+# /etc/labgpu/spot.toml (see docs/SPEC.md section 2.2)
 
 [controller]
 poll_interval = 5

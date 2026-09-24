@@ -1,4 +1,4 @@
-# A spot job — see docs/SPEC.md section 2.8
+# A spot job (see docs/SPEC.md section 2.8)
 name = "resnet50-sweep"
 image = "cr.backend.ai/stable/python-pytorch:2.3-py312-cuda12.4"
 command = ["python", "train.py", "--resume-from", "/home/work/proj/ckpt"]
