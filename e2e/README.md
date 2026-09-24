@@ -43,3 +43,11 @@ labgpu 플러그인과 스팟 컨트롤러를 실제로 돌려 보는 스크립�
 - WSL의 NVML은 프로세스별 정보를 주지 않고, Docker Desktop 컨테이너의 PID는 WSL 배포판에서 보이지 않습니다.
   그래서 소유자 활동 감지는 가짜 NVML 파일로 시험합니다.
 - Windows가 예약한 TCP 포트 범위(30000번대 일부)와 Backend.AI 기본 컨테이너 포트 범위가 겹칩니다.
+
+## 네이티브 GPU 노드 실험 (`e2e/node/`)
+
+WSL이 아닌 실제 연구실 노드에서 돌리는 일회성 실험입니다. Backend.AI를 건드리지 않습니다.
+
+| 스크립트 | 내용 |
+|---|---|
+| `cc_migrate.sh` | `cuda-checkpoint`로 학습 프로세스를 같은 GPU에서 멈췄다 재개하고, 다른 GPU로 옮겨 이어지는지 확인 (`cc_train.py` 사용). 먼저 `scripts/install_cuda_checkpoint.sh --prefix ~/cc-test`로 도구를 받습니다. |
