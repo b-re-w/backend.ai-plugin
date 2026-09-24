@@ -12,5 +12,5 @@ async def main():
         rqst = Request("POST", "/admin/gql")
         rqst.set_json({"query": sys.argv[1], "variables": json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}})
         async with rqst.fetch() as resp:
-            print(json.dumps(await resp.json())[:1500])
+            print(json.dumps(await resp.json()))
 asyncio.run(main())

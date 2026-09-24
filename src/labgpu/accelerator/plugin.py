@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from decimal import Decimal
@@ -61,7 +62,7 @@ try:
 except ImportError:
     from ai.backend.agent.docker.resources import get_resource_spec_from_container
 
-from .. import __version__, devalloc
+from .. import __version__, devalloc, spotstatus
 from ..fraction import build_hami_environ, compute_limits
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..selection import GpuSelector, claim_gpus, validate_key
@@ -123,6 +124,9 @@ class LabGpuPlugin(AbstractComputePlugin):
     sm_limit: bool = True
 
     _nvml: NvmlReader | FakeNvmlReader | None = None
+    spot_status_path: Path = spotstatus.DEFAULT_STATUS_PATH
+    spot_status_max_age: float = spotstatus.DEFAULT_MAX_AGE
+    _container_gpus: dict[str, list[str]] | None = None
     _devices: list[CUDAFracDevice] | None = None
 
     @property
@@ -224,6 +228,8 @@ class LabGpuPlugin(AbstractComputePlugin):
         self.hook_path = Path(cfg.get("hook_path", "/opt/labgpu/lib/libvgpu.so"))
         self.reserved_memory = int(cfg.get("reserved_memory", "0"))
         self.sm_limit = str(cfg.get("sm_limit", "true")).lower() in ("1", "true", "yes")
+        self.spot_status_path = Path(cfg.get("spot_status_path", spotstatus.DEFAULT_STATUS_PATH))
+        self.spot_status_max_age = float(cfg.get("spot_status_max_age", spotstatus.DEFAULT_MAX_AGE))
         if self.shares_per_device <= 0 or self.quantum_size <= 0:
             raise ValueError("shares_per_device and quantum_size must be positive")
 
@@ -526,7 +532,61 @@ class LabGpuPlugin(AbstractComputePlugin):
                     for cid, u in util.items()
                 },
             ),
+            *await self._lending_measures(container_ids),
         ]
+
+    async def _lending_measures(self, container_ids: Sequence[str]) -> list[ContainerMeasurement]:
+        """`<key>_lent` and `<key>_lent_since` per session (SPEC 1.13); nothing if status is unknown."""
+        if not self.enabled or not container_ids:
+            return []
+        status = await asyncio.to_thread(
+            spotstatus.read_status, self.spot_status_path, time.time(), self.spot_status_max_age
+        )
+        if status is None:
+            return []
+        own = {d.uuid for d in self._devices or []}
+        figures = spotstatus.session_lending(await self._gpus_of(container_ids), own, status)
+        if not figures:
+            return []
+        return [
+            ContainerMeasurement(
+                MetricKey(f"{self.key}_lent"),
+                MetricTypes.GAUGE,
+                unit_hint="count",
+                stats_filter=frozenset({"max"}),
+                per_container={
+                    cid: Measurement(Decimal(f.lent), Decimal(f.total)) for cid, f in figures.items()
+                },
+            ),
+            ContainerMeasurement(
+                MetricKey(f"{self.key}_lent_since"),
+                MetricTypes.GAUGE,
+                unit_hint="count",
+                stats_filter=frozenset(),
+                per_container={
+                    cid: Measurement(Decimal(int(f.since))) for cid, f in figures.items()
+                },
+            ),
+        ]
+
+    async def _gpus_of(self, container_ids: Sequence[str]) -> dict[str, list[str]]:
+        """Container id -> GPU UUIDs it holds, from its env; each container is inspected once."""
+        cache = self._container_gpus if self._container_gpus is not None else {}
+        missing = [cid for cid in container_ids if cid not in cache]
+        if missing:
+            try:
+                async with aiodocker.Docker() as docker:
+                    for cid in missing:
+                        try:
+                            container = await docker.containers.get(cid)
+                            env = ((await container.show()).get("Config") or {}).get("Env") or []
+                        except DockerError:
+                            env = []
+                        cache[cid] = spotstatus.uuids_from_env(env)
+            except DockerError as e:
+                log.warning("[%s] cannot inspect containers for lending stats: %r", self.entry_name, e)
+        self._container_gpus = {cid: cache[cid] for cid in container_ids if cid in cache}
+        return self._container_gpus
 
     async def gather_process_measures(
         self, ctx: StatContext, pid_map: Mapping[int, str]

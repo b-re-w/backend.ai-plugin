@@ -161,6 +161,23 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
   5. idle checker의 사용률 기준을 `<key>_util`, `<key>_mem`으로 적습니다.
   6. 자원 정책·프리셋에 종류별 슬롯(`pro6000.shares` 등)을 씁니다.
 
+### 1.13 세션별 GPU 대여 통계
+
+WebUI 세션 세부 화면(5장)이 "내 GPU가 지금 스팟에 빌려 나가 있는가"를 보여 줄 수 있도록, 플러그인이
+세션(컨테이너)별 통계 두 개를 함께 보고합니다. 매니저는 25.8부터 세션 통계(`live_stat`)를 Prometheus에서
+읽으며, 통계 이름을 가리지 않으므로 이 값도 세션 주인의 권한으로 조회됩니다.
+
+| 통계 | current | capacity |
+|---|---|---|
+| `<key>_lent` | 이 세션이 받은 이 종류 GPU 중 지금 스팟에 빌려준 수 | 이 세션이 받은 이 종류 GPU 수 |
+| `<key>_lent_since` | 가장 먼저 빌려준 시각(유닉스 초), 없으면 0 | (없음) |
+
+- 출처는 같은 노드 스팟 컨트롤러의 현황 파일입니다. 설정 키 `spot_status_path`(기본
+  `/var/lib/labgpu/status.json`)로 위치를 바꿀 수 있습니다.
+- 파일이 없거나 60초보다 오래됐으면(`spot_status_max_age`) 두 통계를 **보고하지 않습니다**. 모르는 상태를
+  "빌려주지 않음"으로 보여 주지 않기 위해서입니다.
+- 세션이 받은 GPU는 컨테이너 환경변수 `LABGPU_DEVICE_UUIDS`로 알아냅니다(컨테이너별로 한 번만 조회해 기억).
+
 ### 1.12 가짜 NVML 모드 (개발·시험 전용)
 
 환경변수 `LABGPU_FAKE_NVML=<json 파일>`이 있으면 NVML 대신 이 파일을 읽습니다(매 호출마다 다시 읽음).
@@ -370,6 +387,19 @@ readonly = false
 | `labgpu-spot status` | GPU별 상태(데몬이 매 틱 `<state_dir>/status.json`에 씀) |
 | `labgpu-spot pause [--gpu UUID]` / `resume [--gpu UUID]` | 노드 또는 GPU 단위로 빌려주기 중지/재개. 중지하면 빌려준 것도 회수합니다. |
 
+### 2.9.1 현황 파일 `<state_dir>/status.json`
+
+매 틱 원자적으로 다시 씁니다. `labgpu-spot status`와 플러그인(1.13)이 읽습니다.
+
+```json
+{"updated_at": 1790000000.0,
+ "gpus": [{"uuid": "GPU-...", "state": "LENT", "lendable": false, "must_reclaim": false,
+           "reasons": [], "lendable_memory": 0, "idle_for": 7800.0, "model": "NVIDIA RTX PRO 6000 ...",
+           "lent_job": 12, "lent_since": 1789992200.0}]}
+```
+
+`lent_job`, `lent_since`는 그 GPU에서 스팟 작업이 돌고 있을 때만 값이 있고, 아니면 `null`입니다.
+
 ### 2.10 재시작 복구
 
 데몬이 시작할 때:
@@ -392,6 +422,22 @@ readonly = false
 (소유자 util, 소유자 mem, 기준값, 여유 메모리).
 
 ---
+
+## 5. WebUI 세션 세부 화면 (사용자 포크 `backend.ai-webui`)
+
+세션 세부 화면(`react/src/components/SessionDetailContent.tsx`)의 정보 표에 두 줄을 더합니다. WebUI 확장
+페이지 방식으로는 이 화면에 끼워 넣을 수 없어 포크를 직접 고칩니다. 변경은 새 컴포넌트 파일 하나와
+세부 화면의 몇 줄로 한정합니다.
+
+- **포트**: 세션의 `service_ports`마다 `서비스명  호스트:호스트포트 → 컨테이너포트`. 호스트는 메인 커널의
+  `agent_addr`에서 꺼낸 주소입니다(매니저 API에 포트가 열린 주소가 따로 없어서입니다. 에이전트의 RPC 주소와
+  컨테이너 포트를 여는 주소가 다른 설치에서는 맞지 않을 수 있어 실기 확인 항목). 값을 누르면 복사됩니다.
+  서비스가 없으면 줄을 숨깁니다.
+- **GPU 대여**: 메인 커널 `live_stat`의 `*_lent`, `*_lent_since`(1.13)를 모아
+  "빌려주는 중 (GPU n/m, 시작 시각부터 경과 시간)" 또는 "빌려주지 않음". 해당 통계가 하나도 없으면(스팟을
+  쓰지 않는 노드, 현황이 오래됨, 매니저에 Prometheus가 없음) 줄을 숨깁니다.
+- 문구는 i18n(`resources/i18n/ko.json`, `en.json`)의 `labgpu.*` 키로 둡니다.
+- 권한: 세부 화면이 이미 쓰는 세션 조회 권한 그대로입니다(주인과 관리자).
 
 ## 3. 테스트와 검증
 

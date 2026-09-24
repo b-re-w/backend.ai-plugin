@@ -261,10 +261,22 @@ class Controller:
             self._stop(a.container)
 
     def write_status(self, path: Path, now: float) -> None:
+        """Per-GPU state for `labgpu-spot status` and the accelerator plugin (SPEC 2.9.1)."""
+        lent: dict[str, tuple[int, float | None]] = {}
+        for spot in self.store.active():
+            rec = self.store.get(spot.job_id)
+            if spot.gpu_uuid and rec is not None:
+                lent[spot.gpu_uuid] = (spot.job_id, rec.started_at)
         status = {
             "updated_at": now,
             "gpus": [
-                {**asdict(v), "state": str(v.state)} for v in self.last_verdicts.values()
+                {
+                    **asdict(v),
+                    "state": str(v.state),
+                    "lent_job": lent[v.uuid][0] if v.uuid in lent else None,
+                    "lent_since": lent[v.uuid][1] if v.uuid in lent else None,
+                }
+                for v in self.last_verdicts.values()
             ],
         }
         tmp = path.with_suffix(".tmp")

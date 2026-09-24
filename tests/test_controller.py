@@ -223,3 +223,15 @@ def test_host_xorg_does_not_block_or_reclaim_lending(tmp_path):
     gpus.procs.append(GpuProcess(51, 100 * 2**20, 0, name="python"))
     ctl.tick(610)
     assert len(docker.stopped) == 1
+
+
+def test_status_file_reports_lent_job_and_start(tmp_path):
+    import json
+    ctl, store, gpus, docker, jid = make(tmp_path)
+    ctl.tick(0)
+    ctl.tick(600)  # decides LENDABLE, then launches
+    ctl.tick(605)  # the next tick sees the running spot
+    ctl.write_status(tmp_path / "status.json", 606)
+    gpu = json.loads((tmp_path / "status.json").read_text())["gpus"][0]
+    assert gpu["state"] == "LENT" and gpu["lent_job"] == jid
+    assert gpu["lent_since"] == store.get(jid).started_at

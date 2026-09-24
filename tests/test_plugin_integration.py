@@ -216,3 +216,30 @@ def test_memory_bounds_split_same_model(tmp_path, monkeypatch):
     small = init_plugin(GpuSlotPlugin2, hook, key="pro5000", model_pattern="*PRO 5000*", max_memory="60g")
     assert [d.uuid for d in asyncio.run(large.list_devices())] == ["GPU-l"]
     assert [d.uuid for d in asyncio.run(small.list_devices())] == ["GPU-s"]
+
+
+def test_lending_measures_per_session(fake_primary, tmp_path):
+    import time
+    status = tmp_path / "status.json"
+    now = time.time()
+    status.write_text(json.dumps({"updated_at": now, "gpus": [
+        {"uuid": "GPU-p6000-1", "lent_job": 7, "lent_since": now - 600},
+        {"uuid": "GPU-p6000-2", "lent_job": None, "lent_since": None},
+    ]}))
+    p = init_plugin(GpuSlotPlugin1, fake_primary, key="pro6000", model_pattern="*PRO 6000*",
+                    spot_status_path=str(status))
+
+    async def fake_gpus_of(container_ids):
+        return {"c1": ["GPU-p6000-1"], "c2": ["GPU-p6000-2"], "c3": ["GPU-a6000"]}
+
+    p._gpus_of = fake_gpus_of
+    measures = {str(m.key): m for m in asyncio.run(p.gather_container_measures(None, ["c1", "c2", "c3"]))}
+    lent = measures["pro6000_lent"].per_container
+    assert (lent["c1"].value, lent["c1"].capacity) == (1, 1)
+    assert (lent["c2"].value, lent["c2"].capacity) == (0, 1)
+    assert "c3" not in lent  # the A6000 belongs to another plugin
+    assert int(measures["pro6000_lent_since"].per_container["c1"].value) == int(now - 600)
+
+    status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale file
+    keys = {str(m.key) for m in asyncio.run(p.gather_container_measures(None, ["c1"]))}
+    assert "pro6000_lent" not in keys
