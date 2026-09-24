@@ -7,7 +7,7 @@ import pytest
 from labgpu import devalloc, procmap
 from labgpu.fraction import build_hami_environ, compute_limit, compute_limits
 from labgpu.sizes import GiB, MiB, parse_size
-from labgpu.spot.hostinfo import CpuSampler, parse_cpu_usage_usec, parse_meminfo_available
+from labgpu.spot.hostinfo import CpuSampler, parse_cpu_usage_usec
 
 CID = "a" * 64
 
@@ -90,8 +90,7 @@ def test_parse_cgroup_host_process():
     assert procmap.parse_cgroup("0::/user.slice/user-1000.slice/session-3.scope\n") is None
 
 
-def test_meminfo_and_cpu_stat():
-    assert parse_meminfo_available("MemTotal: 100 kB\nMemAvailable: 2048 kB\n") == 2 * MiB
+def test_cpu_stat():
     assert parse_cpu_usage_usec("usage_usec 1500\nuser_usec 1000\n") == 1500
 
 

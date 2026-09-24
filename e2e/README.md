@@ -30,10 +30,8 @@ labgpu 플러그인과 스팟 컨트롤러를 실제로 돌려 보는 스크립�
 | `06_start.sh` | manager·agent 시작 (가짜 NVML) |
 | `10_order.sh`, `11_ports.sh` | agent `allocation-order`, 컨테이너 포트 범위(Windows 예약 포트 회피) |
 | `09_sessions.sh` | 종류별 세션 생성, 컨테이너 환경변수 확인 |
-| `12_spot.sh` | 스팟 대여·회수 시나리오 (가짜 NVML + 실제 Backend.AI 소유자 세션) |
 | `13_hami.sh` | HAMi-core 빌드 (CUDA 12.4 호환 커밋) |
 | `14_real_prep.sh`, `08_agent_real.sh`, `15_real.sh` | 실제 GPU(NVML) 모드: 0.5 세션 두 개, HAMi-core 주입 확인 |
-| `17_real_spot.sh` | 실제 GPU에서 스팟 대여, 새 소유자 세션으로 회수 |
 | `16_hami_debug.sh` | HAMi-core 단독 실행 진단 (WSL에서는 segfault. SPEC 3.2 참고) |
 | `sync.sh` | 코드를 고친 뒤 플러그인을 다시 복사하고 테스트 실행 |
 

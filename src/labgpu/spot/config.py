@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Self
 
-from ..sizes import MiB, parse_size
+from ..sizes import MiB
 
 DEFAULT_CONFIG_PATH = Path("/etc/labgpu/spot.toml")
 
@@ -16,7 +16,6 @@ DEFAULT_CONFIG_PATH = Path("/etc/labgpu/spot.toml")
 class ControllerConfig:
     poll_interval: float = 5.0
     state_dir: Path = Path("/var/lib/labgpu")
-    kill_switch_file: Path = Path("/etc/labgpu/spot.disabled")
 
 
 @dataclass(frozen=True)
@@ -39,7 +38,6 @@ class IdleConfig:
 
 @dataclass(frozen=True)
 class ReclaimConfig:
-    grace_seconds: int = 30
     mem_reserve_mib: int = 2048
 
     @property
@@ -48,22 +46,10 @@ class ReclaimConfig:
 
 
 @dataclass(frozen=True)
-class SpotConfig:
-    hook_path: Path = Path("/opt/labgpu/lib/libvgpu.so")
-    allow_unenforced: bool = False
-    cpu_shares: int = 64
-    default_ram: int = 16 * 2**30
-    host_ram_reserve: int = 32 * 2**30
-    allowed_mount_roots: tuple[Path, ...] = (Path("/vfroot"),)
-    max_attempts: int = 20
-
-
-@dataclass(frozen=True)
 class Config:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     reclaim: ReclaimConfig = field(default_factory=ReclaimConfig)
-    spot: SpotConfig = field(default_factory=SpotConfig)
 
     @classmethod
     def load(cls, path: Path | None) -> Self:
@@ -76,24 +62,14 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Self:
-        unknown = set(raw) - {"controller", "idle", "reclaim", "spot"}
+        unknown = set(raw) - {"controller", "idle", "reclaim"}
         if unknown:
             raise ValueError(f"unknown config sections: {sorted(unknown)}")
-        c = raw.get("controller", {})
-        s = dict(raw.get("spot", {}))
-        for key in ("default_ram", "host_ram_reserve"):
-            if key in s:
-                s[key] = parse_size(s[key])
-        if "hook_path" in s:
-            s["hook_path"] = Path(s["hook_path"])
-        if "allowed_mount_roots" in s:
-            s["allowed_mount_roots"] = tuple(Path(p) for p in s["allowed_mount_roots"])
-        c = {k: Path(v) if k in ("state_dir", "kill_switch_file") else v for k, v in c.items()}
+        c = {k: Path(v) if k == "state_dir" else v for k, v in raw.get("controller", {}).items()}
         return cls(
             controller=_build(ControllerConfig, c),
             idle=_build(IdleConfig, _tuple_field(raw.get("idle", {}), "ignored_processes")),
             reclaim=_build(ReclaimConfig, raw.get("reclaim", {})),
-            spot=_build(SpotConfig, s),
         )
 
 

@@ -1,21 +1,10 @@
-"""Host-level readings: available RAM and per-container CPU usage (cgroup v2)."""
+"""Host-level readings: per-container CPU usage (cgroup v2)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from .. import procmap
-
-
-def parse_meminfo_available(text: str) -> int:
-    for line in text.splitlines():
-        if line.startswith("MemAvailable:"):
-            return int(line.split()[1]) * 1024
-    raise ValueError("MemAvailable not found")
-
-
-def mem_available(meminfo: Path = Path("/proc/meminfo")) -> int:
-    return parse_meminfo_available(meminfo.read_text())
 
 
 def parse_cpu_usage_usec(text: str) -> int:

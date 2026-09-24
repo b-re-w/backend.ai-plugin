@@ -6,9 +6,6 @@ import pytest
 from labgpu.nvml import FakeNvmlReader, NvmlError, open_reader
 from labgpu.selection import GpuClaimConflict, GpuSelector, claim_gpus, model_matches, validate_key
 from labgpu.sizes import GiB
-from labgpu.spot.jobspec import JobSpec, JobSpecError
-from labgpu.spot.model import GpuState, GpuVerdict, QueuedJob
-from labgpu.spot.planner import plan
 
 PRIMARY = {
     "driver": "fake",
@@ -74,19 +71,6 @@ def test_fake_reader(tmp_path, monkeypatch):
     assert open_reader().is_fake
 
 
-def test_planner_respects_gpu_models():
-    def v(uuid, model):
-        return GpuVerdict(uuid, GpuState.LENDABLE, True, False, (), 40 * GiB, 0, model)
-
-    verdicts = {"A": v("A", "NVIDIA RTX A6000"), "B": v("B", "NVIDIA RTX PRO 6000 Blackwell")}
-    queue = [QueuedJob(1, 0, 0.0, 0, GiB, ("*PRO 6000*",))]
-    p = plan(verdicts, [], queue, ram_budget=100 * GiB, enforced=True)
-    assert [(launch.job_id, launch.gpu_uuid) for launch in p.launches] == [(1, "B")]
-
-
-def test_jobspec_gpu_models():
-    spec = JobSpec.from_dict({"name": "n", "image": "i", "command": ["x"], "gpu_models": ["*A6000*"]})
-    assert JobSpec.from_json(spec.to_json()).gpu_models == ("*A6000*",)
-    assert model_matches("NVIDIA RTX A6000", spec.gpu_models)
-    with pytest.raises(JobSpecError):
-        JobSpec.from_dict({"name": "n", "image": "i", "command": ["x"], "gpu_models": "*A6000*"})
+def test_model_matches():
+    assert model_matches("NVIDIA RTX A6000", ("*A6000*",))
+    assert not model_matches("NVIDIA RTX A6000", ("*PRO 6000*",))

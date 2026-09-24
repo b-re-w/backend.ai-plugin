@@ -6,12 +6,12 @@
 |---|---|---|
 | **부분 GPU (fGPU)** | `cuda_frac` 가속기 플러그인 | `0.5` GPU처럼 소수로 할당하고, HAMi-core로 메모리·SM 사용률을 실제로 제한합니다. |
 | **GPU 종류별 슬롯** | `gpu_slot_1~4` 가속기 플러그인 | 한 서버에 여러 종류 GPU가 있을 때 agent를 나누지 않고 `pro6000.shares`, `a6000.shares`처럼 종류마다 슬롯을 둡니다. CPU·RAM은 공용으로 유동적입니다. |
-| **스팟 대여** | `labgpu-spot` 컨트롤러 | 소유자가 GPU를 안 쓰는 동안 그 GPU를 스팟 작업에 빌려주고, 소유자가 돌아오면 즉시 회수합니다. 소유자 세션은 끄지 않습니다. |
+| **스팟 대여** (만드는 중) | WebUI 세션 런처의 스팟 실행 모드 + `labgpu-spot` 유휴 감시기 | 소유자가 GPU를 안 쓰는 동안 그 GPU를 스팟 세션에 빌려주고, 소유자가 돌아오면 회수합니다. 지금은 유휴 판정까지만 있고, 실행 모드는 설계 승인 전입니다. |
 
 두 기능은 따로 켤 수 있습니다. 왜 만드는지는 [docs/INTENT.md](docs/INTENT.md), 정확한 동작은
 [docs/SPEC.md](docs/SPEC.md)를 보세요.
 
-> **상태:** WSL2에서 Backend.AI 26.9 manager·agent를 띄워 종류별 슬롯, 세션 배정, 스팟 대여·회수까지
+> **상태:** WSL2에서 Backend.AI 26.9 manager·agent를 띄워 종류별 슬롯, 세션 배정까지
 > 확인했습니다. **HAMi-core의 실제 메모리 제한은 WSL에서 확인할 수 없어(HAMi-core가 WSL에서 동작하지 않음)
 > 네이티브 Linux GPU 노드에서 먼저 확인해야 합니다.** 자세한 결과는 [SPEC 3.2](docs/SPEC.md#32-실기-검증표).
 > 연구실 서버는 25.15.6에서 26.8.3으로 올리는 중이라, 실제 서버에서의 동작은 아직 확인 전입니다.
@@ -102,10 +102,12 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
    Secondary처럼 해당 종류가 없는 노드에서는 그 슬롯이 0으로 보고됩니다.
 4. 이미지의 지원 가속기 목록에 새 key(`pro6000` 등)를 넣고, 자원 정책·프리셋을 종류별 슬롯으로 바꿉니다.
 
-## 4. 스팟 대여 켜기
+## 4. 스팟 대여
 
-1. 설정 파일을 놓습니다. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고
-   값을 조정하세요. 특히 `allowed_mount_roots`는 vfolder 호스트 경로(기본 `/vfroot`)로 맞춥니다.
+스팟은 WebUI 세션 런처에서 고르는 실행 모드로 만듭니다(스팟 세션도 Backend.AI 세션). 설계 승인 전이라
+아직 쓸 수 없습니다. 지금 들어 있는 것은 노드마다 GPU가 소유자에게서 놀고 있는지 판정하는 감시기입니다.
+
+1. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
 2. systemd 서비스를 등록합니다.
 
    ```bash
@@ -116,46 +118,13 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 
 3. 상태 확인: `sudo labgpu-spot status`
 
-### 스팟 작업 제출
+감시기를 끄거나 지워도 Backend.AI와 소유자 세션에는 영향이 없습니다.
 
-[examples/job.toml](examples/job.toml)처럼 작업 파일을 쓰고 제출합니다.
-
-```bash
-labgpu-spot submit job.toml            # 내 uid로 실행됨
-sudo labgpu-spot submit job.toml --as 1001:1001   # 관리자가 대신 제출
-labgpu-spot ls                          # 대기·실행 중 작업
-labgpu-spot ls --all                    # 끝난 작업 포함
-labgpu-spot cancel 12
-```
-
-스팟 작업 규칙:
-
-- **언제든 끊길 수 있습니다.** 소유자가 돌아오면 SIGTERM을 받고 30초(기본) 뒤 강제 종료됩니다.
-  SIGTERM을 받으면 체크포인트를 저장하고, 시작할 때 체크포인트에서 이어 가게 짜 주세요.
-  환경변수 `LABGPU_ATTEMPT`로 몇 번째 시도인지 알 수 있습니다.
-- 끊긴 작업은 실패가 아니라 **대기열로 돌아가** 다른 빈 GPU에서 다시 시작됩니다.
-- GPU 1장만 씁니다. GPU 메모리는 그 GPU의 여유분까지만 쓸 수 있습니다.
-- 데이터와 체크포인트는 `mounts`로 붙인 vfolder 경로에 저장하세요. 컨테이너는 끝나면 지워집니다.
-  로그는 `/var/lib/labgpu/logs/`에 남습니다.
-- 이미지는 노드에 이미 있어야 합니다(`docker pull`을 하지 않습니다).
-
-### 운영 스위치
-
-| 하고 싶은 것 | 명령 |
-|---|---|
-| 이 노드 대여 중지 (빌려준 것도 회수) | `sudo labgpu-spot pause` |
-| 특정 GPU만 중지 | `sudo labgpu-spot pause --gpu GPU-xxxx` |
-| 재개 | `sudo labgpu-spot resume [--gpu GPU-xxxx]` |
-| 비상 정지 | `sudo touch /etc/labgpu/spot.disabled` |
-
-컨트롤러가 정상 종료되면 빌려준 GPU를 모두 회수합니다. 컨트롤러를 끄거나 지워도 Backend.AI와
-소유자 세션에는 영향이 없습니다.
-
-## 5. 소유자가 알아 둘 것
+## 5. 소유자가 알아 둘 것 (스팟 실행 모드가 생긴 뒤)
 
 - 세션을 켜 둔 채 GPU를 **30분(기본)** 동안 안 쓰면 그 GPU가 스팟에 빌려질 수 있습니다. 세션은 그대로 유지됩니다.
-- GPU를 다시 쓰기 시작하면(커널 실행, 메모리 추가 할당, CPU 사용) 몇 초 안에 스팟이 회수됩니다. 회수가 끝날 때까지
-  수 초~30초 정도 GPU를 나눠 쓰므로 잠깐 느릴 수 있습니다.
+- GPU를 다시 쓰기 시작하면(커널 실행, 메모리 추가 할당, CPU 사용) 스팟이 회수됩니다. 회수가 끝날 때까지
+  잠깐 GPU를 나눠 쓰므로 느릴 수 있습니다.
 - 모델을 GPU 메모리에 올려 둔 채 쉬면, 그 메모리는 건드리지 않고 **남는 메모리만** 빌려줍니다.
 - 서버에서 Backend.AI를 거치지 않고 GPU를 직접 쓰면(직접 `python` 실행, `docker run --gpus` 등) 그 GPU의
   스팟은 회수됩니다. 누구의 작업인지 알 수 없어 주인 쪽으로 판단하기 때문입니다. 화면 서버(`Xorg`)처럼
@@ -173,7 +142,7 @@ pytest
 Backend.AI 소스로 돌리려면 Python 3.13 환경에 `backend.ai/requirements.txt`를 설치한 뒤
 `PYTHONPATH=src:../backend.ai/src pytest`를 실행합니다.
 
-GPU가 없어도 테스트는 돌아갑니다. 판단 로직(`labgpu.spot.detector`, `planner`, `jobs`, `labgpu.fraction`)은
+GPU가 없어도 테스트는 돌아갑니다. 판단 로직(`labgpu.spot.detector`, `labgpu.fraction`)은
 순수 함수이고, NVML·Docker·Backend.AI는 얇은 어댑터(`labgpu.nvml`, `labgpu.spot.docker`,
 `labgpu.accelerator.plugin`)에만 있습니다. 작업 원칙은 저장소 루트의 [AGENTS.md](../AGENTS.md)를 보세요.
 
@@ -186,6 +155,6 @@ src/labgpu/
   selection.py       GPU 종류 선택(모델명·메모리)과 중복 점유 방지
   accelerator/plugin.py   플러그인 구현 (cuda_frac.py, gpu_slot.py는 엔트리 포인트 모듈)
   spot/
-    config.py  model.py  detector.py  planner.py  observer.py
-    jobs.py  jobspec.py  docker.py  hostinfo.py  daemon.py  cli.py
+    config.py  model.py  detector.py  observer.py
+    docker.py  hostinfo.py  daemon.py  cli.py
 ```

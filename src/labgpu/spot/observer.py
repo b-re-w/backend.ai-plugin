@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
-from .docker import OwnerContainer, SpotContainer
+from .docker import OwnerContainer
 from .model import ClassifiedProcess, GpuObservation, ProcKind
 
 log = logging.getLogger("ai.backend.labgpu.spot.observer")
@@ -35,18 +35,15 @@ def build_observation(
     pid_to_container: Mapping[int, str | None],
     owners_on_gpu: Mapping[str, OwnerContainer],
     all_owner_ids: set[str],
-    spot_gpu_by_container: Mapping[str, str | None],
     owner_cpu: Mapping[str, float | None],
     ignored_names: Collection[str] = (),
 ) -> GpuObservation:
-    """Classify each GPU process as owner, spot, ignored, or unknown for this GPU."""
+    """Classify each GPU process as owner, ignored, or unknown for this GPU."""
     uuid = snap.info.uuid
     processes = []
     for p in snap.processes:
         cid = pid_to_container.get(p.pid)
-        if cid is not None and cid in spot_gpu_by_container:
-            kind = ProcKind.SPOT if spot_gpu_by_container[cid] == uuid else ProcKind.UNKNOWN
-        elif cid is not None and cid in owners_on_gpu:
+        if cid is not None and cid in owners_on_gpu:
             kind = ProcKind.OWNER
         elif cid is None and p.name and p.name in ignored_names:
             # Host-only: a container cannot escape by renaming a process (SPEC 2.1).
@@ -77,7 +74,6 @@ def observe(
     gpus: Sequence[GpuInfo],
     snapshot: Callable[[int], GpuSnapshot],
     owners: Sequence[OwnerContainer],
-    spots: Sequence[SpotContainer],
     pid_mapper: Callable[[list[int]], Mapping[int, str | None]],
     owner_cpu: Mapping[str, float | None],
     ignored_names: Collection[str] = (),
@@ -86,7 +82,6 @@ def observe(
     for o in owners:
         for uuid in resolve_gpu_refs(o.gpu_refs, gpus):
             owners_by_gpu[uuid][o.id] = o
-    spot_gpu = {s.id: s.gpu_uuid for s in spots if s.running}
     all_owner_ids = {o.id for o in owners}
 
     observations = []
@@ -107,7 +102,6 @@ def observe(
                 pid_to_container=pid_map,
                 owners_on_gpu=owners_by_gpu[g.uuid],
                 all_owner_ids=all_owner_ids,
-                spot_gpu_by_container=spot_gpu,
                 owner_cpu=owner_cpu,
                 ignored_names=ignored_names,
             )

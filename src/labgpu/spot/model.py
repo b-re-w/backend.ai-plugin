@@ -1,14 +1,13 @@
-"""Plain data exchanged between the observer, detector, planner, and executor."""
+"""Plain data exchanged between the observer and the detector."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 
 class ProcKind(StrEnum):
     OWNER = "owner"
-    SPOT = "spot"
     UNKNOWN = "unknown"
     IGNORED = "ignored"  # host process on the ignore list, e.g. the display server (SPEC 2.1)
 
@@ -75,37 +74,3 @@ class GpuVerdict:
     lendable_memory: int = 0  # bytes a new spot job may use
     idle_for: float = 0.0
     model: str = ""
-
-
-@dataclass(frozen=True)
-class RunningSpot:
-    job_id: int
-    gpu_uuid: str
-    container: str
-    reclaiming: bool = False
-
-
-@dataclass(frozen=True)
-class QueuedJob:
-    job_id: int
-    priority: int
-    submitted_at: float
-    gpu_mem: int
-    ram: int
-    gpu_models: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class Launch:
-    job_id: int
-    gpu_uuid: str
-    gpu_mem_limit: int
-    ram: int
-
-
-@dataclass(frozen=True)
-class Reclaim:
-    job_id: int
-    gpu_uuid: str
-    container: str
-    reasons: tuple[str, ...] = field(default_factory=tuple)

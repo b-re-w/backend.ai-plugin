@@ -8,11 +8,11 @@
 | 구성 요소 | 어디서 도나 | 하는 일 |
 |---|---|---|
 | `cuda_frac` 가속기 플러그인 (`labgpu.accelerator`) | 각 GPU 노드의 Backend.AI **agent** 프로세스 안 | GPU를 `cuda.shares`(소수) 단위로 할당하고, HAMi-core로 컨테이너별 GPU 메모리·SM 사용률을 제한합니다. |
-| `labgpu-spot` 컨트롤러 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 감지해 스팟 컨테이너를 띄우고, 소유자가 돌아오면 회수합니다. |
+| `labgpu-spot` 유휴 감시기 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 씁니다. 스팟 실행 자체는 WebUI 실행 모드로 만들 예정이며 설계 승인 전입니다(2장). |
 | 공용 모듈 (`labgpu.fraction`, `labgpu.nvml`, `labgpu.procmap`, `labgpu.devalloc`) | 둘 다 | 할당량 계산, NVML 조회, PID→컨테이너 매핑. |
 
-두 구성 요소는 **서로 독립적**입니다. 플러그인만 써도(fGPU만), 컨트롤러만 써도(오픈소스 `cuda`
-플러그인 + 스팟) 동작해야 합니다.
+두 구성 요소는 **서로 독립적**입니다. 플러그인만 써도(fGPU만), 감시기만 써도(오픈소스 `cuda`
+플러그인) 동작해야 합니다.
 
 ### 의존성
 
@@ -202,16 +202,19 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 
 ---
 
-## 2. `labgpu-spot` 컨트롤러
+## 2. `labgpu-spot` 유휴 감시기
+
+> 스팟은 Backend.AI WebUI 세션 런처의 실행 모드로 만듭니다(스팟 세션도 Backend.AI 세션).
+> 그 설계는 아직 승인 전이라 이 절에 적지 않습니다. 지금 구현은 GPU가 소유자에게서 놀고 있는지
+> 판정해 현황 파일에 쓰는 부분까지입니다. 아래 "빌려준(LENT)" 관련 규칙은 판정기에 남아 있는
+> 회수 판정 규칙이며, 실제로 빌려주는 동작은 아직 없습니다.
 
 ### 2.1 개념
 
 - **소유자(owner)**: Backend.AI 커널 컨테이너(라벨 `ai.backend.kernel-id`가 있음)이면서 GPU가 붙어 있는 것.
 - **점유(claimed) GPU**: 소유자 컨테이너가 하나라도 붙어 있는 GPU.
-- **스팟(spot)**: 컨트롤러가 띄운 컨테이너(라벨 `labgpu.spot=1`). 스팟 작업 하나 = GPU 1장.
-- **정체불명(unknown) 프로세스**: GPU를 쓰는데 소유자 컨테이너도 스팟도 아닌 프로세스(호스트 프로세스,
-  Backend.AI 밖의 컨테이너). **소유자 활동으로 간주**합니다(안전 우선). 스팟 컨테이너의 프로세스라도
-  그 스팟이 배정받은 GPU가 아닌 곳에 나타나면 정체불명으로 봅니다.
+- **정체불명(unknown) 프로세스**: GPU를 쓰는데 소유자 컨테이너가 아닌 프로세스(호스트 프로세스,
+  Backend.AI 밖의 컨테이너). **소유자 활동으로 간주**합니다(안전 우선).
 - **무시하는 프로세스(ignored)**: 컨테이너 밖(호스트)에서 돌면서 이름이 `ignored_processes`에 있는
   프로세스. 워크스테이션 GPU에 늘 떠 있는 화면 서버(`/usr/lib/xorg/Xorg`)처럼, 있어도 소유자 활동이
   아닌 것들입니다. 활동 판정에서 빼고 정체불명으로도 보지 않습니다. 이 프로세스가 쓰는 GPU 메모리는
@@ -225,7 +228,6 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 [controller]
 poll_interval = 5            # 초
 state_dir = "/var/lib/labgpu"
-kill_switch_file = "/etc/labgpu/spot.disabled"   # 이 파일이 있으면 전부 회수하고 빌려주지 않음
 
 [idle]
 idle_minutes = 30            # 소유자가 이만큼 연속으로 쉬어야 빌려줌
@@ -236,17 +238,8 @@ unclaimed_grace_seconds = 60 # 아무도 안 붙은 GPU를 빌려주기 전 대�
 ignored_processes = ["Xorg"] # 호스트에서 늘 GPU를 쓰는, 소유자 활동이 아닌 프로세스 이름
 
 [reclaim]
-grace_seconds = 30           # SIGTERM 후 SIGKILL까지
-mem_reserve_mib = 2048       # 스팟 메모리 상한 = 총 − 현재 사용 − 이 값
+mem_reserve_mib = 2048       # 빌려줄 수 있는 메모리 = 총 − 현재 사용 − 이 값
 
-[spot]
-hook_path = "/opt/labgpu/lib/libvgpu.so"
-allow_unenforced = false     # true면 HAMi-core 없이도 빌려줌 (소유자 OOM 위험)
-cpu_shares = 64              # Docker 기본 1024 대비 낮은 CPU 우선순위
-default_ram = "16g"
-host_ram_reserve = "32g"     # 호스트 MemAvailable에서 항상 남겨 둘 양
-allowed_mount_roots = ["/vfroot"]
-max_attempts = 20            # 회수로 인한 재시도 최대 횟수
 ```
 
 ### 2.3 관측 (매 틱)
@@ -263,7 +256,6 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
   3. 환경변수 `NVIDIA_VISIBLE_DEVICES` (값이 `all`이면 모든 GPU)
 - 소유자 컨테이너 CPU 사용량: `State.Pid`의 cgroup v2 `cpu.stat`의 `usage_usec` 변화량 / 경과 시간.
   읽을 수 없으면 CPU 조건은 건너뜁니다.
-- 호스트 `MemAvailable` (`/proc/meminfo`).
 
 ### 2.4 GPU 상태 기계 (`labgpu.spot.detector`)
 
@@ -298,99 +290,15 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 
 - GPU 여유 메모리(총 − 사용) < `mem_reserve_mib / 2` (스팟은 여유분을 남기고 시작하므로, 여유가
   절반 밑으로 줄었다면 누군가 예상 밖으로 메모리를 잡은 것입니다)
-- UNKNOWN 진입, 킬 스위치 파일 존재, 해당 GPU나 노드가 `pause` 상태
-
-### 2.5 계획 (`labgpu.spot.planner`)
-
-순수 함수입니다. 입력: GPU별 판정 결과, 실행 중인 스팟 작업, 대기열, 호스트 여유 RAM. 출력: 동작 목록.
-
-1. **회수 먼저.** 회수 조건에 걸린 LENT GPU마다 `Reclaim(job, gpu, reason)`.
-2. **시작.** LENDABLE이면서 스팟이 없는 GPU마다, 대기열을 `priority 내림차순 → 제출 시각 오름차순`으로
-   훑어 **처음 맞는 작업**을 고릅니다(backfill). 맞는다는 것은:
-   - `job.gpu_mem ≤ 총 − 사용 − mem_reserve_mib` (작업이 gpu_mem을 안 적었으면 1GiB로 간주)
-   - `job.ram ≤ MemAvailable − host_ram_reserve − (이번 틱에 이미 배정한 RAM)`
-   - HAMi-core가 있거나 `allow_unenforced = true`
-   - 작업에 `gpu_models`가 있으면 GPU 모델명이 패턴 중 하나와 맞음
-3. 스팟 GPU 메모리 상한 = `총 − 사용 − mem_reserve_mib` (작업 요청값이 더 작아도 여유분 전체를 줍니다.
-   소유자가 돌아오면 어차피 회수되기 때문입니다).
-
-### 2.6 스팟 컨테이너 실행 (`labgpu.spot.docker`)
-
-```
-docker run -d --name labgpu-spot-<job_id>-<attempt>
-  --label labgpu.spot=1 --label labgpu.job-id=<id> --label labgpu.gpu-uuid=<uuid>
-  --gpus device=<uuid>
-  --cpu-shares <cpu_shares>
-  --memory <ram> --memory-swap <ram> --oom-score-adj 1000
-  --user <uid>:<gid>
-  -v <hook_path>:/opt/labgpu/libvgpu.so:ro -e LD_PRELOAD=/opt/labgpu/libvgpu.so
-  -e CUDA_DEVICE_MEMORY_LIMIT_0=<MiB>m
-  -e CUDA_DEVICE_MEMORY_SHARED_CACHE=/tmp/labgpu-vgpu.cache
-  -e LABGPU_SPOT=1 -e LABGPU_JOB_ID=<id> -e LABGPU_ATTEMPT=<n>
-  -v <src>:<dst>[:ro] ...   (allowed_mount_roots 아래만)
-  [-w <workdir>] [--entrypoint <entrypoint>]
-  <image> <command...>
-```
-
-- 회수: `docker stop -t <grace_seconds> <container>` (SIGTERM → 유예 → SIGKILL). 컨트롤러 루프를
-  막지 않도록 백그라운드 프로세스로 실행합니다.
-- `docker run`은 `--pull never`로 실행합니다. 이미지를 받는 동안 컨트롤러 루프가 멈추면 회수가 늦어지기
-  때문입니다. 이미지가 노드에 없으면 작업은 FAILED(`launch failed: …`)가 됩니다. `docker run` 자체가
-  실패한 경우도 같습니다(자동 재시도 없음).
-- 종료된 스팟 컨테이너는 로그를 `<state_dir>/logs/<job_id>.<attempt>.log`로 저장한 뒤 삭제합니다.
-
-### 2.7 작업 대기열 (`labgpu.spot.jobs`, SQLite `<state_dir>/spot.db`)
-
-작업 상태:
-
-```
-QUEUED ──시작──► RUNNING ──스스로 종료, exit 0──► SUCCEEDED
-   ▲                │  └────스스로 종료, exit≠0──► FAILED
-   │                ▼ 회수
-   └──(attempts < max)── PREEMPTING ──(attempts ≥ max)──► FAILED
-QUEUED/RUNNING ──cancel──► CANCELLED (실행 중이면 docker stop)
-```
-
-- 회수로 끝난 작업은 **실패가 아닙니다.** `attempts`와 `preemptions`를 올리고 다시 QUEUED가 됩니다.
-- 기록 필드: id, name, 제출자 uid/gid, 스펙(JSON), priority, state, attempts, preemptions,
-  gpu_uuid, container, 제출/시작/종료 시각, exit_code, 마지막 사유. 크레딧 제도에 쓸 수 있도록
-  시도별 실행 기록(`runs` 테이블: job_id, attempt, gpu_uuid, 시작/종료, 종료 사유)도 남깁니다.
-- `settings` 테이블: `paused_node`, `paused_gpus`(UUID 목록). CLI로 바꾸면 다음 틱에 반영됩니다.
-
-### 2.8 작업 명세 파일 (TOML)
-
-```toml
-name = "resnet50-sweep"
-image = "cr.backend.ai/stable/python-pytorch:2.3-py312-cuda12.4"
-command = ["python", "train.py", "--resume-from", "/home/work/proj/ckpt"]
-workdir = "/home/work/proj"      # 선택
-entrypoint = ""                  # 선택, ""이면 이미지의 ENTRYPOINT를 비움
-gpu_mem = "20g"                  # 선택, 필요한 최소 GPU 메모리
-gpu_models = ["*PRO 6000*"]      # 선택, 이 모델명 패턴의 GPU에서만 실행 (대소문자 무시)
-ram = "16g"                      # 선택, 기본 default_ram
-priority = 0                     # 선택, 클수록 먼저
-env = { WANDB_MODE = "offline" }
-[[mounts]]
-src = "/vfroot/local/user-xxxx/proj"
-dst = "/home/work/proj"
-readonly = false
-```
-
-- 제출할 때 모든 `src`는 `allowed_mount_roots` 중 하나 아래에 있어야 하고, `..`를 풀어낸 실제 경로로
-  검사합니다.
-- 작업은 제출자의 uid/gid로 실행합니다. root가 제출하면 `--as uid:gid`를 반드시 줘야 합니다
-  (스팟을 root로 돌리지 않기 위해).
+- UNKNOWN 진입
 
 ### 2.9 CLI `labgpu-spot`
 
 | 명령 | 동작 |
 |---|---|
 | `labgpu-spot daemon [-c spot.toml]` | 컨트롤러 실행 (systemd용) |
-| `labgpu-spot submit job.toml [--as uid:gid]` | 작업 제출, 작업 ID 출력 |
-| `labgpu-spot ls [--all]` | 작업 목록 |
-| `labgpu-spot cancel <job_id>` | 작업 취소 |
 | `labgpu-spot status` | GPU별 상태(데몬이 매 틱 `<state_dir>/status.json`에 씀) |
-| `labgpu-spot pause [--gpu UUID]` / `resume [--gpu UUID]` | 노드 또는 GPU 단위로 빌려주기 중지/재개. 중지하면 빌려준 것도 회수합니다. |
+
 
 ### 2.9.1 현황 파일 `<state_dir>/status.json`
 
@@ -398,33 +306,20 @@ readonly = false
 
 ```json
 {"updated_at": 1790000000.0,
- "gpus": [{"uuid": "GPU-...", "state": "LENT", "lendable": false, "must_reclaim": false,
+ "gpus": [{"uuid": "GPU-...", "state": "LENDABLE", "lendable": true, "must_reclaim": false,
            "reasons": [], "lendable_memory": 0, "idle_for": 7800.0, "model": "NVIDIA RTX PRO 6000 ...",
-           "lent_job": 12, "lent_since": 1789992200.0}]}
+           "lent_job": null, "lent_since": null}]}
 ```
 
-`lent_job`, `lent_since`는 그 GPU에서 스팟 작업이 돌고 있을 때만 값이 있고, 아니면 `null`입니다.
+`lent_job`, `lent_since`는 스팟을 빌려준 GPU에 쓸 자리입니다. 빌려주는 기능이 아직 없어 늘 `null`입니다.
 
-### 2.10 재시작 복구
+### 2.10 재시작
 
-데몬이 시작할 때:
-
-1. 라벨 `labgpu.spot=1` 컨테이너를 모두 찾습니다.
-2. DB에서 RUNNING/PREEMPTING인 작업마다: 컨테이너가 살아 있으면 그대로 LENT로 이어 갑니다.
-   끝나 있으면 종료 처리(2.7), 컨테이너가 아예 없으면 회수된 것으로 보고 다시 QUEUED.
-3. DB의 실행 중 작업과 연결되지 않은 스팟 컨테이너는 로그를 남기고 삭제합니다(`docker rm -f`).
-
-데몬이 끝날 때:
-
-- 정상 종료(SIGTERM/SIGINT)면 빌려준 GPU를 **모두 회수**하고 `docker stop`이 끝나기를 기다립니다.
-  컨트롤러가 없으면 소유자를 지켜 줄 주체가 없기 때문입니다. 회수된 작업은 다음 시작 때 대기열로 돌아갑니다.
-- 틱 처리 중 예외가 나면 모두 회수하고 다음 틱에서 계속합니다.
-- 비정상 종료에 대비해 systemd 유닛의 `ExecStopPost`가 라벨 `labgpu.spot=1` 컨테이너를 멈춥니다.
+재시작하면 모든 GPU를 방금 쓴 것으로 보고 유휴 시간을 처음부터 다시 잽니다(2.4). 저장하는 상태는 없습니다.
 
 ### 2.11 로그
 
-모든 lend/reclaim/launch/finish에 대해 한 줄 로그: GPU UUID, 작업 ID, 사유, 판정에 쓴 수치
-(소유자 util, 소유자 mem, 기준값, 여유 메모리).
+관측 실패와 Docker 오류를 로그로 남깁니다. 판정 사유는 현황 파일의 `reasons`에 들어갑니다.
 
 ---
 
@@ -452,9 +347,7 @@ readonly = false
 - `devalloc`: 두 입력 형태 정규화
 - `procmap`: cgroup v1/v2/systemd 형식 파싱
 - `detector`: 상태 전이 전부(유휴 전환, 회수 조건 각각, UNKNOWN, 재시작 직후)
-- `planner`: 회수 우선, backfill, RAM·GPU 메모리 적합성, 강제 불가 시 미대여
-- `jobs`: 상태 전이, 재시도 한도, 재시작 복구
-- `docker`: 생성되는 `docker run` 인자(마운트 검증 포함)
+- `docker`: 소유자 컨테이너의 GPU 참조 해석 순서
 
 ### 3.2 실기 검증표
 
@@ -479,18 +372,13 @@ readonly = false
 | HAMi-core 빌드 | HEAD는 CUDA 12.5 이상 헤더가 필요합니다(`CUctxCreateParams`). CUDA 12.4로는 그 직전 커밋 `6b92be9`로 빌드됨. 노드의 CUDA 툴킷에 맞는 커밋을 고정해 쓰세요. |
 | HAMi-core 공유 영역 파일은 같은 컨테이너 안의 다른 사용자(예: root `docker exec`)가 열면 `EACCES` | 확인. 세션 프로세스가 한 사용자로 돌면 문제없음 |
 | HAMi-core `CUDA_DEVICE_SM_LIMIT`가 실제로 동작 | UNVERIFIED (네이티브 노드 필요) |
-| 스팟: 유휴 시간 뒤 대여, `gpu_models`·`gpu_mem` 조건, 대여 메모리 = 총 − 사용 − 여유분 | 확인 (가짜 NVML, 실제 Backend.AI 소유자 세션) |
-| 스팟: 소유자 사용률 상승 / 정체불명 프로세스 / 새 소유자 세션 → 회수(SIGTERM, exit 143) → 대기열 → 다른 GPU에 재대여 | 확인 (새 소유자 세션 회수는 실제 RTX 4050에서) |
-| 스팟: pause/resume, 컨트롤러 SIGTERM 시 전부 회수, 허용 루트 밖 마운트 거부, 없는 이미지는 FAILED | 확인 |
-| 스팟 컨테이너에 실제 GPU가 UUID로 붙음 (`--gpus device=<uuid>`) | 확인 (실제 RTX 4050) |
-| Backend.AI 커널 이미지를 `docker run`으로 직접 실행 (`entrypoint = ""`) | 확인 (최소 커널 이미지) |
 | `nvmlDeviceGetProcessUtilization`이 호스트 PID로 프로세스별 SM 사용률을 줌 | UNVERIFIED. WSL은 NVML 프로세스 정보를 주지 않음. 네이티브 노드 필요 |
 | 소유자 CPU 조건(cgroup v2) | UNVERIFIED. Docker Desktop은 컨테이너 PID가 WSL 배포판에 보이지 않음 |
 | **26.8.3(최신 안정판)**: 플러그인 로딩, 종류별 슬롯, 종류별 세션 배정과 HAMi-core 환경변수, 전체 테스트 61개 | 확인 (2026-09-24, WSL, 가짜 NVML) |
 | **26.8.3 WebUI(26.8.1)**: 세션 생성 화면의 AI 가속기 종류 선택지가 PRO6000/PRO5000/A6000으로 나뉘고, 막대 최대값이 종류별로 2/1/1, CPU·메모리 최대값도 실제 서버 크기(21코어, 14.38GB) | 확인 (브라우저 자동 조작) |
 | 26.9.0rc1에서는 세션 생성 화면의 자원 그룹 한도 요청(`accessible_scaling_groups`)이 업스트림 버그로 실패해 막대가 기본값(가속기 16, CPU 64)으로 나옴 | 업스트림 버그(2026-09-15 커밋 `700bc1c1fd`). 26.8.3에는 없음 |
 | etcd `config/resource_slots`에 실제로 없는 가속기(`cuda.device` 등)가 등록되어 있으면 WebUI가 그것을 기본 선택지로 보여 줌 | 확인. 매니저가 시작할 때 넣는 것으로 보여, 운영 시 실제 종류만 남겨야 함(`e2e/prune_slots.sh`) |
-| 호스트 `Xorg`가 모든 GPU에 떠 있어도 빌려주고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg 때문에 회수하지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
+| 호스트 `Xorg`가 모든 GPU에 떠 있어도 LENDABLE로 판정하고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg는 활동으로 보지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
 | WebUI 세션 세부 화면(사용자 포크 v26.8.1 기반): "포트" 줄과 "GPU 대여" 줄. 빌려준 세션은 "빌려주는 중, GPU 1/1, 경과 시간", 아닌 세션은 "빌려주지 않음" | 확인 (26.8.3, WSL, Prometheus 포함, 브라우저 자동 조작, 2026-09-25) |
 | 에이전트 재시작 뒤 매니저가 통계를 중복 합산해도 화면 값이 맞음(capacity 1 보정) | 단위 테스트로 확인 |
 | 연구실 서버(26.8.3으로 올리는 중)에서 위 항목 전부 | UNVERIFIED |
@@ -502,8 +390,9 @@ readonly = false
   GPU 네 장에 흩어집니다. 스팟에 통째로 빌려줄 GPU를 남기려면 가장 덜 빈 GPU부터 고르는 할당 맵
   (`FractionAllocMap` 하위 클래스)이 필요합니다. affinity hint 처리와 충돌하지 않게 만드는 방법을 검토해야 합니다.
 
-- 스팟을 Backend.AI 세션으로 편입(A안: `cuda.spot` 슬롯을 동적으로 노출)할 수 있는가? agent가 실행
-  중에 슬롯 용량 변경을 매니저에 반영하는지 확인이 필요합니다.
+- 스팟 실행 모드(WebUI 세션 런처)의 설계. 26.8.3 agent는 플러그인의 `available_slots`를 30초마다 다시 읽어
+  매니저에 보고하므로(`UpdateSlotsTask`) 슬롯 용량을 실행 중에 바꿀 수 있다는 점까지는 확인했습니다.
+  나머지(슬롯 형태, 회수 방법, 같은 종류 GPU로의 자동 이동)는 설계 승인 뒤에 적습니다.
 - 소유자가 GPU 메모리를 크게 잡은 채 쉬는 경우(예: 70GB 모델 상주) 빌려줄 여유가 거의 없습니다.
   이런 GPU를 대시보드로 보여 주고 정책(세션 정리 권고)으로 풀지 결정해야 합니다.
-- 크레딧: `runs` 테이블에 빌려준 GPU 시간이 쌓이지만, 소유자별 집계와 우선순위 반영은 아직 없습니다.
+- 크레딧: 빌려준 GPU 시간의 소유자별 집계와 우선순위 반영은 아직 없습니다.
