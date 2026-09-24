@@ -18,7 +18,7 @@
 
 - Python ≥ 3.12
 - `nvidia-ml-py` (NVML 바인딩, `import pynvml`)
-- 플러그인: Backend.AI agent 25.19가 이미 설치한 패키지(`ai.backend.agent`, `ai.backend.common`, `aiodocker`)
+- 플러그인: Backend.AI agent(26.8.3 기준, 25.x도 고려)가 이미 설치한 패키지(`ai.backend.agent`, `ai.backend.common`, `aiodocker`)
 - 컨트롤러: `docker` CLI, 표준 라이브러리(`sqlite3`, `tomllib`)만
 - 호스트에 설치된 HAMi-core `libvgpu.so` (vendoring하지 않음, 직접 빌드해 둠)
 
@@ -129,7 +129,7 @@ etcd 값은 모두 문자열로 들어오므로 문자열로 파싱합니다.
 
 ### 1.10 `device_alloc` 형태 호환 (`labgpu.devalloc`)
 
-25.19는 `Mapping[SlotName, Mapping[DeviceId, Decimal]]`를, 최신 코드는 `DeviceAllocation`
+25.x는 `Mapping[SlotName, Mapping[DeviceId, Decimal]]`를, 최신 코드는 `DeviceAllocation`
 (`units` 속성)을 넘깁니다. 모든 메서드는 입력을 먼저 `{slot: {device_id: Decimal}}`로 정규화합니다.
 
 ### 1.11 GPU 종류별 슬롯
@@ -154,7 +154,7 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
      슬롯만 WebUI에 넘깁니다. 26.x는 DB `resource_slot_types` 표에도 표시 정보를 둡니다.
   2. **agent.toml `[resource] allocation-order`에 새 key를 모두 넣습니다.** 기본값
      `["cuda", "rocm", "tpu", "cpu", "mem"]`에 없는 key가 요청되면 agent가 `ValueError: '<key>' is not in list`로
-     커널 생성을 거부합니다(25.12부터 있는 설정이라 25.19에도 해당, E2E에서 발견).
+     커널 생성을 거부합니다(25.12부터 있는 설정, E2E에서 발견).
   3. agent.toml `allow-compute-plugins`/`block-compute-plugins`를 모듈 경로로 적습니다
      (예: allow `["labgpu.accelerator"]`, block `["labgpu.accelerator.cuda_frac"]`).
   4. 이미지의 지원 가속기 목록(`ai.backend.accelerators` 라벨 또는 관리자 화면)에 새 key를 넣습니다.
@@ -170,7 +170,12 @@ WebUI 세션 세부 화면(5장)이 "내 GPU가 지금 스팟에 빌려 나가 �
 | 통계 | current | capacity |
 |---|---|---|
 | `<key>_lent` | 이 세션이 받은 이 종류 GPU 중 지금 스팟에 빌려준 수 | 이 세션이 받은 이 종류 GPU 수 |
-| `<key>_lent_since` | 가장 먼저 빌려준 시각(유닉스 초), 없으면 0 | (없음) |
+| `<key>_lent_since` | 가장 먼저 빌려준 시각(유닉스 초), 없으면 0 | 항상 1 |
+
+`<key>_lent_since`의 capacity를 늘 1로 두는 이유: 매니저는 최근 시간 창(`[metric] timewindow`, 기본 1시간)의
+통계를 에이전트 서비스 ID 구분 없이 **더해서** 돌려줍니다. 에이전트가 재시작되면 새 서비스 ID가 생겨 같은
+세션 값이 한동안 2배, 3배로 합쳐집니다(업스트림 동작, 26.8.3에서 확인, 기존 `*_util` 등도 같음). capacity 합이
+곧 중복 배수 k가 되므로, 화면은 모든 값을 k로 나눠 원래 값을 되살립니다.
 
 - 출처는 같은 노드 스팟 컨트롤러의 현황 파일입니다. 설정 키 `spot_status_path`(기본
   `/var/lib/labgpu/status.json`)로 위치를 바꿀 수 있습니다.
@@ -486,7 +491,9 @@ readonly = false
 | 26.9.0rc1에서는 세션 생성 화면의 자원 그룹 한도 요청(`accessible_scaling_groups`)이 업스트림 버그로 실패해 막대가 기본값(가속기 16, CPU 64)으로 나옴 | 업스트림 버그(2026-09-15 커밋 `700bc1c1fd`). 26.8.3에는 없음 |
 | etcd `config/resource_slots`에 실제로 없는 가속기(`cuda.device` 등)가 등록되어 있으면 WebUI가 그것을 기본 선택지로 보여 줌 | 확인. 매니저가 시작할 때 넣는 것으로 보여, 운영 시 실제 종류만 남겨야 함(`e2e/prune_slots.sh`) |
 | 호스트 `Xorg`가 모든 GPU에 떠 있어도 빌려주고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg 때문에 회수하지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
-| 25.19에서 위 항목 전부 | UNVERIFIED (연구실은 최신 안정판으로 올릴 예정) |
+| WebUI 세션 세부 화면(사용자 포크 v26.8.1 기반): "포트" 줄과 "GPU 대여" 줄. 빌려준 세션은 "빌려주는 중, GPU 1/1, 경과 시간", 아닌 세션은 "빌려주지 않음" | 확인 (26.8.3, WSL, Prometheus 포함, 브라우저 자동 조작, 2026-09-25) |
+| 에이전트 재시작 뒤 매니저가 통계를 중복 합산해도 화면 값이 맞음(capacity 1 보정) | 단위 테스트로 확인 |
+| 연구실 서버(26.8.3으로 올리는 중)에서 위 항목 전부 | UNVERIFIED |
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
 
 ## 4. 열린 질문

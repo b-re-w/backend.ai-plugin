@@ -239,6 +239,7 @@ def test_lending_measures_per_session(fake_primary, tmp_path):
     assert (lent["c2"].value, lent["c2"].capacity) == (0, 1)
     assert "c3" not in lent  # the A6000 belongs to another plugin
     assert int(measures["pro6000_lent_since"].per_container["c1"].value) == int(now - 600)
+    assert measures["pro6000_lent_since"].per_container["c1"].capacity == 1
 
     status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale file
     keys = {str(m.key) for m in asyncio.run(p.gather_container_measures(None, ["c1"]))}

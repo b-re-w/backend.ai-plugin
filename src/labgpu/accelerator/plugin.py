@@ -564,7 +564,9 @@ class LabGpuPlugin(AbstractComputePlugin):
                 unit_hint="count",
                 stats_filter=frozenset(),
                 per_container={
-                    cid: Measurement(Decimal(int(f.since))) for cid, f in figures.items()
+                    # capacity 1 lets readers undo the manager summing duplicate series
+                    # after agent restarts (SPEC 1.13)
+                    cid: Measurement(Decimal(int(f.since)), Decimal(1)) for cid, f in figures.items()
                 },
             ),
         ]
