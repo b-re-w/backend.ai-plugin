@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Scripts and configs run on Linux (WSL, lab nodes): never check them out with CRLF.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.toml  text eol=lf
+*.service text eol=lf
