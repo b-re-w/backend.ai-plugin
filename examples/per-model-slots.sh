@@ -2,7 +2,7 @@
 # Per-model GPU slots for the lab cluster (SPEC 1.11). Run once on the manager host.
 #
 #   Primary:   PRO 5000 72GB (0), PRO 6000 x2 (1, 2), A6000 (3)
-#   Secondary: PRO 5000 48GB x5 (0-4)
+#   Secondary: PRO 5000 48GB x4 (0-3)
 #
 # The etcd config is shared by every agent; each plugin only takes GPUs matching its pattern,
 # so the same settings work on both servers. Then, on every GPU node's agent.toml:
