@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -10,6 +11,17 @@ from typing import Any, Self
 from ..sizes import MiB
 
 DEFAULT_CONFIG_PATH = Path("/etc/labgpu/spot.toml")
+# Where scripts/install_cuda_checkpoint.sh puts the tool: the plugin checkout's own .venv/bin.
+REPO_DIR = Path(__file__).resolve().parents[3]
+
+
+def default_cuda_checkpoint() -> Path:
+    """<plugin checkout>/.venv/bin/cuda-checkpoint, else whatever is on PATH (SPEC 2.2)."""
+    local = REPO_DIR / ".venv" / "bin" / "cuda-checkpoint"
+    if local.exists():
+        return local
+    found = shutil.which("cuda-checkpoint")
+    return Path(found) if found else local
 
 
 @dataclass(frozen=True)
@@ -50,7 +62,7 @@ class SpotConfig:
     """Moving and evicting spot sessions (SPEC 2.12)."""
 
     enabled: bool = True
-    cuda_checkpoint: Path = Path("/opt/labgpu/bin/cuda-checkpoint")
+    cuda_checkpoint: Path = field(default_factory=default_cuda_checkpoint)
     checkpoint_timeout_seconds: float = 60.0
     park_seconds: float = 300.0
     evict_signal: str = "SIGINT"

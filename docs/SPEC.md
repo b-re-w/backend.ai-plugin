@@ -252,7 +252,8 @@ mem_reserve_mib = 2048       # 빌려줄 수 있는 메모리 = 총 − 현재 �
 
 [spot]
 enabled = true               # false면 스팟 자리를 0으로 보고하고, 도는 스팟은 내보냄
-cuda_checkpoint = "/opt/labgpu/bin/cuda-checkpoint"   # scripts/install_cuda_checkpoint.sh
+cuda_checkpoint = "..."      # 기본: <플러그인 체크아웃>/.venv/bin/cuda-checkpoint, 없으면 PATH
+                             # (scripts/install_cuda_checkpoint.sh가 root 없이 거기에 설치)
 checkpoint_timeout_seconds = 60
 park_seconds = 300           # 옮길 GPU가 없을 때 멈춰 두고 기다리는 시간
 evict_signal = "SIGINT"      # 내보낼 때 보내는 시그널 (파이썬에서는 KeyboardInterrupt)

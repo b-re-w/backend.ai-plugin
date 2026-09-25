@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Install NVIDIA cuda-checkpoint on a GPU node, pinned to a known commit and checksum.
 #
-#   sudo scripts/install_cuda_checkpoint.sh                 # -> /opt/labgpu/bin/cuda-checkpoint
-#   scripts/install_cuda_checkpoint.sh --prefix ~/cc-test   # no root, for a one-off test
+#   scripts/install_cuda_checkpoint.sh                 # -> <this checkout>/.venv/bin/cuda-checkpoint
+#   scripts/install_cuda_checkpoint.sh --prefix DIR    # somewhere else
+#
+# No root needed. The spot monitor looks in <this checkout>/.venv/bin by default (SPEC 2.2).
 #
 # The binary is NVIDIA's (see its LICENSE upstream); we never vendor it into this repo.
 # To move to a newer upstream build, update REF and SHA256 together after checking the release notes.
@@ -14,11 +16,11 @@ URL="https://raw.githubusercontent.com/NVIDIA/cuda-checkpoint/${REF}/bin/x86_64_
 MIN_DRIVER=550        # checkpoint / restore on the same GPU
 MIGRATE_DRIVER=580    # restore onto a different GPU (--device-map)
 
-prefix=/opt/labgpu/bin
+prefix=$(cd "$(dirname "$0")/.." && pwd)/.venv/bin
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) prefix="$2"; shift 2 ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

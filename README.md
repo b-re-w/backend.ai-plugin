@@ -113,8 +113,8 @@ agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`
 
 **GPU 노드마다:**
 
-1. cuda-checkpoint 설치(드라이버 580 이상): `sudo scripts/install_cuda_checkpoint.sh` →
-   `/opt/labgpu/bin/cuda-checkpoint`. 없으면 스팟은 옮기지 못하고 주인이 돌아올 때 내보내집니다.
+1. cuda-checkpoint 설치(드라이버 580 이상): 플러그인 폴더에서 `scripts/install_cuda_checkpoint.sh` →
+   `.venv/bin/cuda-checkpoint` (root 불필요, 감시기가 기본으로 여기서 찾음). 없으면 스팟은 옮기지 못하고 주인이 돌아올 때 내보내집니다.
 2. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
 3. systemd 서비스를 등록합니다.
 
