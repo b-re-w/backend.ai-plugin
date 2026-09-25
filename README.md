@@ -118,7 +118,10 @@ agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`
 2. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
 3. systemd 서비스를 등록합니다.
 
+   서비스 파일은 `/usr/local/bin/labgpu-spot`을 실행하므로, labgpu를 설치한 가상환경의 실행 파일을 거기에 연결합니다.
+
    ```bash
+   sudo ln -sf <labgpu를 설치한 venv>/bin/labgpu-spot /usr/local/bin/labgpu-spot
    sudo cp examples/labgpu-spot.service /etc/systemd/system/
    sudo systemctl daemon-reload && sudo systemctl enable --now labgpu-spot
    journalctl -u labgpu-spot -f
