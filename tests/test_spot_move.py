@@ -10,7 +10,7 @@ from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
 from labgpu.spot.placement import Evict, Move, Park, ParkedSpot, Restore, RunningSpot, plan
-from labgpu.spotstatus import parse_status, spot_capacity
+from labgpu.spotstatus import parse_status, pick_spot_gpu, spot_capacity
 
 P6K = "NVIDIA RTX PRO 6000"
 A6K = "NVIDIA RTX A6000"
@@ -277,3 +277,17 @@ def test_background_monitor_runs_once_per_process(tmp_path):
     finally:
         first.stop()
     assert BackgroundMonitor._running is None
+
+
+def test_pick_spot_gpu_takes_the_roomiest_free_lendable_gpu():
+    text = json.dumps({"updated_at": 100, "gpus": [
+        {"uuid": "A", "state": "LENDABLE", "lendable_memory": 10},
+        {"uuid": "B", "state": "LENDABLE", "lendable_memory": 50},
+        {"uuid": "C", "state": "LENT", "lent_job": "x", "lendable_memory": 0},
+        {"uuid": "D", "state": "BUSY"},
+    ]})
+    status = parse_status(text, 110)
+    assert pick_spot_gpu(["A", "B", "C", "D"], status) == ("B", 50)
+    assert pick_spot_gpu(["A", "B"], status, taken={"B"}) == ("A", 10)
+    assert pick_spot_gpu(["C", "D"], status) is None
+    assert pick_spot_gpu(["A"], None) is None

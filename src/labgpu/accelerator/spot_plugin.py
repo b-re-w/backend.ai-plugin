@@ -5,9 +5,10 @@ Spot launch mode as Backend.AI accelerator plugins (SPEC 2.12).
 session is a normal Backend.AI session that requests it from the WebUI session launcher. The slot
 capacity is the number of GPUs of that model the idleness monitor currently judges lendable or
 lent, re-read every time the agent refreshes its slots (30 s in 26.8), so the manager only
-schedules spot sessions while there is room. Which GPU a spot session actually runs on, and moving
-it when the owner comes back, is the monitor's job (`labgpu.spot`); this plugin attaches every GPU
-of the model so the monitor can move the session between them with cuda-checkpoint.
+schedules spot sessions while there is room. This plugin picks the GPU a new spot session runs on
+(a LENDABLE one) and caps its memory with HAMi-core; the other GPUs of the model are attached too,
+because cuda-checkpoint can only move a process to a GPU it can see, but capped at 1 MiB so the
+session cannot use them. Moving the session when the owner comes back is the monitor's job.
 
 The monitor runs in a background thread of the agent itself, started by the first spot plugin
 that initialises (SPEC 2.13); there is no separate service.
@@ -50,7 +51,10 @@ from ai.backend.common.types import (
 
 from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
+from ..fraction import MEMORY_SHARED_CACHE
+from ..paths import default_hook_path
 from ..selection import GpuSelector, validate_key
+from ..sizes import MiB
 from ..spot.config import DEFAULT_CONFIG_PATH
 from ..spot.config import Config as SpotConfigFile
 from .plugin import (
@@ -70,6 +74,9 @@ POOL_DEVICE_ID = DeviceId("spot")
 # Env handed to spot containers; the monitor recognises spot sessions by it (SPEC 2.12).
 ENV_SPOT = "LABGPU_SPOT"
 ENV_SPOT_UUIDS = "LABGPU_SPOT_UUIDS"
+ENV_SPOT_GPU = "LABGPU_SPOT_GPU"
+BLOCKED_LIMIT = "1m"  # HAMi-core limit for GPUs the session must not use (0 would mean unlimited)
+RESERVE_SECONDS = 120.0  # how long a GPU handed to a new session stays taken before the monitor reports it
 
 
 class LabGpuSpotPlugin(AbstractComputePlugin):
@@ -89,6 +96,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     _nvml: NvmlReader | FakeNvmlReader | None = None
     _gpus: list[GpuInfo] | None = None
     _monitor: Any = None  # the BackgroundMonitor this instance started, if any
+    hook_path: Path = default_hook_path()
+    _handed_out: dict[str, float] | None = None  # GPU uuid -> when a new session got it
 
     @property
     def slot(self) -> SlotName:
@@ -111,6 +120,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         self.display_unit = cfg.get("display_unit")
         self.spot_status_path = Path(cfg.get("spot_status_path", spotstatus.DEFAULT_STATUS_PATH))
         self.spot_status_max_age = float(cfg.get("spot_status_max_age", spotstatus.DEFAULT_MAX_AGE))
+        self.hook_path = Path(cfg["hook_path"]) if cfg.get("hook_path") else default_hook_path()
+        self._handed_out = {}
         self.slot_types = ((self.slot, SlotTypes.COUNT),)
         self.exclusive_slot_types = {str(self.slot)}
         try:
@@ -118,6 +129,15 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             await self._list_gpus()
         except NvmlError as e:
             log.error("[%s] NVML unavailable (%s); disabled.", self.entry_name, e)
+            self.enabled = False
+            return
+        if not self.hook_path.is_file():
+            # SPEC 2.12: a spot session without a memory cap could starve the owner; offer none.
+            log.error(
+                "[%s] HAMi-core %s not found: spot memory cannot be capped, spot slots disabled.",
+                self.entry_name,
+                self.hook_path,
+            )
             self.enabled = False
             return
         if str(cfg.get("monitor", "true")).lower() not in ("0", "false", "no"):
@@ -208,17 +228,45 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
 
     # ---- container creation ----
 
+    def _pick(self) -> tuple[str, int]:
+        """The lendable GPU for a new spot session and its memory cap in bytes (SPEC 2.12)."""
+        now = time.time()
+        handed = {u: t for u, t in (self._handed_out or {}).items() if now - t < RESERVE_SECONDS}
+        status = spotstatus.read_status(self.spot_status_path, now, self.spot_status_max_age)
+        picked = spotstatus.pick_spot_gpu([g.uuid for g in self._gpus or []], status, handed)
+        if picked is None:
+            # The manager only schedules while there is room, so this is a race; the monitor
+            # will move or evict the session. Cap it hard meanwhile.
+            log.warning("[%s] no lendable GPU for a new spot session", self.entry_name)
+            picked = ((self._gpus or [])[0].uuid, 0)
+        handed[picked[0]] = now
+        self._handed_out = handed
+        return picked
+
     async def generate_docker_args(self, docker: Any, device_alloc: Any) -> Mapping[str, Any]:
         if not self.enabled or self._allocated(device_alloc) <= 0:
             return {}
-        uuids = [g.uuid for g in self._gpus or []]
-        env = {ENV_SPOT: "1", ENV_SPOT_UUIDS: ",".join(uuids)}
+        gpus = self._gpus or []
+        chosen, lendable = await asyncio.to_thread(self._pick)
+        # The chosen GPU comes first so it is the program's cuda:0; the others stay attached
+        # for moving but get a 1 MiB cap (SPEC 2.12).
+        order = [chosen] + [g.uuid for g in gpus if g.uuid != chosen]
+        env = {
+            ENV_SPOT: "1",
+            ENV_SPOT_UUIDS: ",".join(g.uuid for g in gpus),
+            ENV_SPOT_GPU: chosen,
+            "CUDA_VISIBLE_DEVICES": ",".join(order),
+            "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
+        }
+        for i, uuid in enumerate(order):
+            env[f"CUDA_DEVICE_MEMORY_LIMIT_{i}"] = (
+                f"{max(lendable // MiB, 1)}m" if uuid == chosen else BLOCKED_LIMIT
+            )
         args: dict[str, Any] = {"Env": [f"{k}={v}" for k, v in env.items()]}
         if not self.is_fake:
-            # Every GPU of the model is attached so the monitor can move the session (SPEC 2.12).
             # NVML indices, not UUIDs: the stock cuda plugin looks DeviceIDs up by index when it
             # gathers container stats and fails on anything else.
-            indices = [str(g.index) for g in self._gpus or []]
+            indices = [str(g.index) for g in gpus]
             args["HostConfig"] = {
                 "DeviceRequests": [
                     {"Driver": "nvidia", "DeviceIDs": indices, "Capabilities": DEVICE_CAPABILITIES}
@@ -227,7 +275,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         return args
 
     async def get_hooks(self, distro: str, arch: str) -> Sequence[Path]:
-        return []
+        return [self.hook_path] if self.enabled else []
 
     async def generate_resource_data(self, device_alloc: Any) -> Mapping[str, str]:
         return {}

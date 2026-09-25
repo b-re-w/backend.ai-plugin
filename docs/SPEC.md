@@ -363,9 +363,17 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   할당 맵 용량은 그 종류 GPU 수로 둡니다. 대신 `available_slots`가 **지금 LENDABLE이거나 LENT인 그 종류
   GPU 수**를 보고하고(현황 파일, 없거나 오래됐으면 0), agent가 30초마다 이를 매니저에 다시 알리므로
   매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은 대기(PENDING)합니다.
-- 스팟 컨테이너에는 **그 종류 GPU를 모두** 붙이고(`DeviceRequests`, NVML 인덱스) `LABGPU_SPOT=1`,
-  `LABGPU_SPOT_UUIDS=<그 종류 GPU UUID 목록>`을 넣습니다. 다른 GPU로 옮기려면 대상 GPU가 프로세스에
-  보여야 하기 때문입니다(cuda-checkpoint 제약). HAMi-core는 넣지 않습니다.
+- **GPU 고르기와 메모리 제한.** 새 스팟 세션이 쓸 GPU는 플러그인이 고릅니다. 현황 파일에서 LENDABLE이고
+  스팟이 없으며 최근 120초 안에 다른 세션에 주지 않은 GPU 중 빌려줄 수 있는 메모리가 가장 큰 것입니다.
+  - 그 GPU를 `CUDA_VISIBLE_DEVICES`의 맨 앞에 두어 프로그램의 `cuda:0`이 되게 하고, HAMi-core로 메모리를
+    그 GPU의 빌려줄 수 있는 메모리(`lendable_memory`)로 제한합니다(`CUDA_DEVICE_MEMORY_LIMIT_0`).
+  - 같은 종류의 **나머지 GPU도 붙이지만 제한을 1MiB로** 둡니다(`CUDA_DEVICE_MEMORY_LIMIT_1..`). 프로그램은 그
+    GPU에 메모리를 잡을 수 없습니다. 붙이는 이유는 cuda-checkpoint가 프로세스에 보이는 GPU로만 옮길 수 있기
+    때문입니다. 옮길 때 원래 GPU와 대상 GPU를 맞바꾸므로 제한도 함께 따라갑니다.
+  - 환경변수: `LABGPU_SPOT=1`, `LABGPU_SPOT_UUIDS`(붙인 GPU 전체), `LABGPU_SPOT_GPU`(고른 GPU).
+    `DeviceRequests`에는 NVML 인덱스로 넣습니다.
+  - HAMi-core(`hook_path`, 기본 `<체크아웃>/.venv/lib/libvgpu.so`)가 없으면 메모리를 제한할 수 없으므로
+    ERROR를 남기고 스팟 플러그인을 끕니다(스팟 자리 0). 주인 우선 원칙입니다.
 - 스팟 세션의 GPU 사용량 통계는 주인 쪽 플러그인이 프로세스 단위로 그 세션에 매깁니다(1.9).
 - **주인 쪽 플러그인은 둘 중 하나**입니다.
   - labgpu 종류별 슬롯(`gpu_slot_N`) 또는 `cuda_frac`: 1.13의 "GPU 대여" 표시와 스팟 세션의 프로세스 단위
@@ -486,6 +494,9 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
 | 감시기: 같은 GPU에 겹친 스팟을 다른 GPU로 옮김, 주인 쪽 활동에 옮길 곳이 없으면 멈춰 둠, 원래 GPU가 비면 되살림, `park_seconds` 뒤 내보냄 | 확인 (같은 환경, 가짜 cuda-checkpoint `e2e/fake_cuda_checkpoint.py`) |
 | 순정 `cuda` 플러그인(`cuda.device`) + `gpu_spot_N` 조합 | UNVERIFIED |
+| 스팟 GPU 고르기와 메모리 제한: `CUDA_VISIBLE_DEVICES` 순서로 고른 GPU가 `cuda:0`이 됨, 나머지 GPU는 1MiB 제한으로 쓸 수 없음(컨텍스트 생성 포함), 컨테이너 안 `nvidia-smi`의 메모리 표시 | UNVERIFIED (연구실 노드) |
+| HAMi-core 제한을 건 채 cuda-checkpoint로 옮긴 뒤 제한이 새 GPU로 따라가는지, `CUDA_VISIBLE_DEVICES`를 순서만 바꿔 준 상태에서 이동이 되는지 | UNVERIFIED (연구실 노드) |
+| 스팟 플러그인의 GPU 고르기·환경변수(`tests/test_plugin_integration.py`) | 테스트는 작성했으나 실제 Backend.AI 클래스로 아직 돌리지 않음 |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
 | 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
@@ -496,11 +507,6 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   GPU 네 장에 흩어집니다. 스팟에 통째로 빌려줄 GPU를 남기려면 가장 덜 빈 GPU부터 고르는 할당 맵
   (`FractionAllocMap` 하위 클래스)이 필요합니다. affinity hint 처리와 충돌하지 않게 만드는 방법을 검토해야 합니다.
 
-- **스팟 메모리 상한.** 스팟 세션에는 HAMi-core를 넣지 않아 GPU 메모리를 제한 없이 잡을 수 있습니다.
-  주인이 돌아와 메모리를 더 잡는 순간 GPU가 꽉 차 있으면, 이동이 끝나기 전(수 초)에 주인 쪽 할당이
-  실패할 수 있습니다. HAMi-core와 cuda-checkpoint를 함께 쓸 수 있는지 확인한 뒤 상한을 넣을지 정해야 합니다.
-- **스팟이 처음 뜨는 GPU.** 모든 같은 종류 GPU가 보이므로 스팟 프로그램은 CUDA 기본 장치에서 시작하고,
-  그곳이 빌려줄 수 없는 GPU면 감시기가 몇 초 안에 옮깁니다. 그 몇 초 동안은 주인 GPU를 함께 씁니다.
 - 소유자가 GPU 메모리를 크게 잡은 채 쉬는 경우(예: 70GB 모델 상주) 빌려줄 여유가 거의 없습니다.
   이런 GPU를 대시보드로 보여 주고 정책(세션 정리 권고)으로 풀지 결정해야 합니다.
 - 크레딧: 빌려준 GPU 시간의 소유자별 집계와 우선순위 반영은 아직 없습니다.

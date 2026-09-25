@@ -259,8 +259,8 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     slot = SlotName("pro6000-spot.device")
     assert asyncio.run(spot.available_slots()) == {slot: Decimal(0)}  # no status yet: no room
     status.write_text(json.dumps({"updated_at": time.time(), "gpus": [
-        {"uuid": "GPU-p6000-1", "state": "LENDABLE"},
-        {"uuid": "GPU-p6000-2", "state": "BUSY"},
+        {"uuid": "GPU-p6000-1", "state": "BUSY"},
+        {"uuid": "GPU-p6000-2", "state": "LENDABLE", "lendable_memory": 80 * 2**30},
         {"uuid": "GPU-a6000", "state": "LENDABLE"},
     ]}))
     assert asyncio.run(spot.available_slots()) == {slot: Decimal(1)}
@@ -272,6 +272,12 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     env = env_of(asyncio.run(spot.generate_docker_args(None, alloc)))
     assert env["LABGPU_SPOT"] == "1"
     assert env["LABGPU_SPOT_UUIDS"] == "GPU-p6000-1,GPU-p6000-2"
+    # The lendable GPU is cuda:0 with its lendable memory; the other one is capped at 1 MiB.
+    assert env["LABGPU_SPOT_GPU"] == "GPU-p6000-2"
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-p6000-2,GPU-p6000-1"
+    assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "81920m"
+    assert env["CUDA_DEVICE_MEMORY_LIMIT_1"] == "1m"
+    assert asyncio.run(spot.get_hooks("ubuntu22.04", "x86_64")) == [fake_primary]
     meta = spot.get_metadata()
     assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"
     assert asyncio.run(spot.generate_docker_args(None, {})) == {}

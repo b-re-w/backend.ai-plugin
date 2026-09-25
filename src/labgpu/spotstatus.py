@@ -24,6 +24,7 @@ class GpuLending:
     lent: bool
     since: float | None
     state: str = ""
+    lendable_memory: int = 0  # bytes a spot session may use on this GPU right now
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ def parse_status(text: str, now: float, max_age: float = DEFAULT_MAX_AGE) -> dic
             lent=g.get("lent_job") is not None,
             since=float(since) if since else None,
             state=str(g.get("state", "")) if spot_on else "",
+            lendable_memory=int(g.get("lendable_memory") or 0),
         )
     return result
 
@@ -94,6 +96,23 @@ def spot_capacity(own_uuids: Collection[str], status: Mapping[str, GpuLending] |
     if status is None:
         return 0
     return sum(1 for u in own_uuids if u in status and status[u].state in SPOT_STATES)
+
+
+def pick_spot_gpu(
+    own_uuids: Iterable[str], status: Mapping[str, GpuLending] | None, taken: Collection[str] = ()
+) -> tuple[str, int] | None:
+    """
+    The GPU a new spot session gets (SPEC 2.12): LENDABLE, not lent, not just handed out
+    (`taken`), with the most lendable memory. Returns (uuid, lendable bytes) or None.
+    """
+    if status is None:
+        return None
+    candidates = [
+        (u, status[u].lendable_memory)
+        for u in own_uuids
+        if u in status and status[u].state == "LENDABLE" and not status[u].lent and u not in taken
+    ]
+    return max(candidates, key=lambda c: c[1]) if candidates else None
 
 
 def uuids_from_env(env: Iterable[str]) -> list[str]:
