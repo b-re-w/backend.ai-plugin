@@ -16,7 +16,7 @@ def test_parse_status_fresh_stale_and_malformed():
         {"state": "BUSY"},  # no uuid: skipped
     ])
     got = parse_status(text, NOW)
-    assert got == {"GPU-a": GpuLending(True, NOW - 600), "GPU-b": GpuLending(False, None)}
+    assert got == {"GPU-a": GpuLending(True, NOW - 600, "LENT"), "GPU-b": GpuLending(False, None, "IDLE")}
     assert parse_status(status(updated=NOW - 61), NOW) is None  # stale: report nothing
     assert parse_status("not json", NOW) is None
     assert parse_status(json.dumps({"gpus": []}), NOW) is None

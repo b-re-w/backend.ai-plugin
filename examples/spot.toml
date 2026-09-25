@@ -15,3 +15,10 @@ ignored_processes = ["Xorg"]   # host display server on workstation GPUs is not 
 [reclaim]
 mem_reserve_mib = 2048
 
+
+[spot]
+enabled = true
+cuda_checkpoint = "/opt/labgpu/bin/cuda-checkpoint"   # scripts/install_cuda_checkpoint.sh
+park_seconds = 300          # wait this long off the GPU for a free one before evicting
+evict_signal = "SIGINT"     # KeyboardInterrupt in Python
+evict_grace_seconds = 30

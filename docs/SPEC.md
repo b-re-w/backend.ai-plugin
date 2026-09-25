@@ -8,7 +8,8 @@
 | 구성 요소 | 어디서 도나 | 하는 일 |
 |---|---|---|
 | `cuda_frac` 가속기 플러그인 (`labgpu.accelerator`) | 각 GPU 노드의 Backend.AI **agent** 프로세스 안 | GPU를 `cuda.shares`(소수) 단위로 할당하고, HAMi-core로 컨테이너별 GPU 메모리·SM 사용률을 제한합니다. |
-| `labgpu-spot` 유휴 감시기 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 씁니다. 스팟 실행 자체는 WebUI 실행 모드로 만들 예정이며 설계 승인 전입니다(2장). |
+| `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`pro6000-spot.device` 등)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
+| `labgpu-spot` 감시기 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 쓰고, 스팟 세션을 옮기거나 멈춰 두거나 내보냅니다(2장). |
 | 공용 모듈 (`labgpu.fraction`, `labgpu.nvml`, `labgpu.procmap`, `labgpu.devalloc`) | 둘 다 | 할당량 계산, NVML 조회, PID→컨테이너 매핑. |
 
 두 구성 요소는 **서로 독립적**입니다. 플러그인만 써도(fGPU만), 감시기만 써도(오픈소스 `cuda`
@@ -202,17 +203,20 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 
 ---
 
-## 2. `labgpu-spot` 유휴 감시기
+## 2. 스팟: `labgpu-spot` 감시기와 `gpu_spot_N` 플러그인
 
-> 스팟은 Backend.AI WebUI 세션 런처의 실행 모드로 만듭니다(스팟 세션도 Backend.AI 세션).
-> 그 설계는 아직 승인 전이라 이 절에 적지 않습니다. 지금 구현은 GPU가 소유자에게서 놀고 있는지
-> 판정해 현황 파일에 쓰는 부분까지입니다. 아래 "빌려준(LENT)" 관련 규칙은 판정기에 남아 있는
-> 회수 판정 규칙이며, 실제로 빌려주는 동작은 아직 없습니다.
+스팟은 Backend.AI WebUI 세션 런처에서 고르는 실행 모드입니다. 스팟 세션도 보통 Backend.AI 세션이고,
+런처의 AI 가속기 종류에서 `PRO6000-SPOT`처럼 "스팟" 종류를 고르면 됩니다(2.12). 노드마다 도는
+`labgpu-spot` 감시기가 GPU가 주인에게서 놀고 있는지 판정하고(2.1~2.4), 스팟 세션이 쓸 수 있는 GPU
+위에만 있도록 옮기거나 멈춰 두거나 내보냅니다(2.12).
 
 ### 2.1 개념
 
 - **소유자(owner)**: Backend.AI 커널 컨테이너(라벨 `ai.backend.kernel-id`가 있음)이면서 GPU가 붙어 있는 것.
 - **점유(claimed) GPU**: 소유자 컨테이너가 하나라도 붙어 있는 GPU.
+- **스팟 세션**: `gpu_spot_N` 슬롯을 받은 세션. 컨테이너 환경변수 `LABGPU_SPOT=1`로 구분하고, 소유자로
+  치지 않습니다. 그 프로세스(SPOT)는 붙어 있는 GPU(`LABGPU_SPOT_UUIDS`) 위에 있는 한 소유자 활동으로
+  보지 않습니다. 붙지 않은 GPU에 나타나면 정체불명입니다.
 - **정체불명(unknown) 프로세스**: GPU를 쓰는데 소유자 컨테이너가 아닌 프로세스(호스트 프로세스,
   Backend.AI 밖의 컨테이너). **소유자 활동으로 간주**합니다(안전 우선).
 - **무시하는 프로세스(ignored)**: 컨테이너 밖(호스트)에서 돌면서 이름이 `ignored_processes`에 있는
@@ -240,6 +244,13 @@ ignored_processes = ["Xorg"] # 호스트에서 늘 GPU를 쓰는, 소유자 활�
 [reclaim]
 mem_reserve_mib = 2048       # 빌려줄 수 있는 메모리 = 총 − 현재 사용 − 이 값
 
+[spot]
+enabled = true               # false면 스팟 자리를 0으로 보고하고, 도는 스팟은 내보냄
+cuda_checkpoint = "/opt/labgpu/bin/cuda-checkpoint"   # scripts/install_cuda_checkpoint.sh
+checkpoint_timeout_seconds = 60
+park_seconds = 300           # 옮길 GPU가 없을 때 멈춰 두고 기다리는 시간
+evict_signal = "SIGINT"      # 내보낼 때 보내는 시그널 (파이썬에서는 KeyboardInterrupt)
+evict_grace_seconds = 30     # 시그널 뒤 SIGKILL까지
 ```
 
 ### 2.3 관측 (매 틱)
@@ -288,16 +299,20 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 
 빌려준(LENT) 상태에서는 위 활동 조건에 더해 다음도 **회수 조건**입니다.
 
-- GPU 여유 메모리(총 − 사용) < `mem_reserve_mib / 2` (스팟은 여유분을 남기고 시작하므로, 여유가
-  절반 밑으로 줄었다면 누군가 예상 밖으로 메모리를 잡은 것입니다)
+- 스팟 메모리를 뺀 GPU 여유 메모리 < `mem_reserve_mib / 2` (스팟 말고 누군가 예상 밖으로 메모리를
+  잡은 것입니다)
+- 주인이 아직 충분히 쉬지 않았음(`idle_for` < 대기 시간): 스팟이 LENDABLE이 아닌 GPU에서 시작한 경우
 - UNKNOWN 진입
+
+GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMING)입니다. 스팟 프로세스는 활동으로 치지
+않으므로 스팟이 돌아도 주인의 유휴 시간은 계속 늘어납니다.
 
 ### 2.9 CLI `labgpu-spot`
 
 | 명령 | 동작 |
 |---|---|
-| `labgpu-spot daemon [-c spot.toml]` | 컨트롤러 실행 (systemd용) |
-| `labgpu-spot status` | GPU별 상태(데몬이 매 틱 `<state_dir>/status.json`에 씀) |
+| `labgpu-spot daemon [-c spot.toml]` | 감시기 실행 (systemd용, root) |
+| `labgpu-spot status` | GPU별 상태와 그 위의 스팟, 멈춰 둔 스팟, 진행 중인 작업 |
 
 
 ### 2.9.1 현황 파일 `<state_dir>/status.json`
@@ -305,21 +320,74 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 매 틱 원자적으로 다시 씁니다. `labgpu-spot status`와 플러그인(1.13)이 읽습니다.
 
 ```json
-{"updated_at": 1790000000.0,
- "gpus": [{"uuid": "GPU-...", "state": "LENDABLE", "lendable": true, "must_reclaim": false,
+{"updated_at": 1790000000.0, "spot_enabled": true, "can_move": true,
+ "gpus": [{"uuid": "GPU-...", "state": "LENT", "lendable": false, "must_reclaim": false,
            "reasons": [], "lendable_memory": 0, "idle_for": 7800.0, "model": "NVIDIA RTX PRO 6000 ...",
-           "lent_job": null, "lent_since": null}]}
+           "lent_job": "3f2a9c1b7d4e", "lent_since": 1789992200.0}],
+ "parked": [{"container": "8f77fe432325", "from": "GPU-...", "since": 1790000000.0}],
+ "busy": {"8f77fe432325": "Move"}}
 ```
 
-`lent_job`, `lent_since`는 스팟을 빌려준 GPU에 쓸 자리입니다. 빌려주는 기능이 아직 없어 늘 `null`입니다.
+- `lent_job`: 그 GPU 위 스팟 세션 컨테이너 ID 앞 12자리, 없으면 `null`. `lent_since`: 그 스팟을 이 GPU에서
+  처음 본 시각.
+- `spot_enabled`가 `false`면 스팟 플러그인은 자리를 0으로 봅니다. `can_move`는 cuda-checkpoint를 쓸 수 있는지.
 
 ### 2.10 재시작
 
-재시작하면 모든 GPU를 방금 쓴 것으로 보고 유휴 시간을 처음부터 다시 잽니다(2.4). 저장하는 상태는 없습니다.
+재시작하면 모든 GPU를 방금 쓴 것으로 보고 유휴 시간을 처음부터 다시 잽니다(2.4). 멈춰 둔 스팟 목록은
+`<state_dir>/parked.json`에 남기고 재시작 때 이어 받습니다. 진행 중이던 이동은 끝난 뒤 종료합니다.
 
 ### 2.11 로그
 
 관측 실패와 Docker 오류를 로그로 남깁니다. 판정 사유는 현황 파일의 `reasons`에 들어갑니다.
+
+
+### 2.12 스팟 실행 모드
+
+**Backend.AI 쪽 (`gpu_spot_1..4` 플러그인, `labgpu.accelerator.spot_plugin`)**
+
+- 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `pro6000-spot` →
+  `pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
+  `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`.
+  설정하지 않은 `gpu_spot_N`은 건너뜁니다.
+- GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
+- 장치는 종류마다 가상 장치 하나(`spot`)입니다. agent는 할당 맵을 시작할 때 한 번만 만들기 때문에
+  할당 맵 용량은 그 종류 GPU 수로 둡니다. 대신 `available_slots`가 **지금 LENDABLE이거나 LENT인 그 종류
+  GPU 수**를 보고하고(현황 파일, 없거나 오래됐으면 0), agent가 30초마다 이를 매니저에 다시 알리므로
+  매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은 대기(PENDING)합니다.
+- 스팟 컨테이너에는 **그 종류 GPU를 모두** 붙이고(`DeviceRequests`) `LABGPU_SPOT=1`,
+  `LABGPU_SPOT_UUIDS=<그 종류 GPU UUID 목록>`을 넣습니다. 다른 GPU로 옮기려면 대상 GPU가 프로세스에
+  보여야 하기 때문입니다(cuda-checkpoint 제약). HAMi-core는 넣지 않습니다.
+- 스팟 세션의 GPU 사용량 통계는 주인 쪽 플러그인이 프로세스 단위로 그 세션에 매깁니다(1.9).
+- agent 설정: `[resource] allocation-order`에 스팟 key를 넣어야 하고(예: `"pro6000", "pro6000-spot", ...`),
+  이미지의 `ai.backend.accelerators` 라벨에도 스팟 key가 있어야 런처가 그 이미지에서 스팟을 보여 줍니다.
+
+**감시기 쪽 (`labgpu.spot.placement`, `ckpt`, `daemon`)**
+
+규칙:
+
+1. 스팟 세션 하나는 GPU 하나에서만, GPU 하나에는 스팟 세션 하나만 돕니다.
+2. 스팟은 LENT이면서 회수 조건이 없는 GPU에만 머뭅니다. 처음에는 CUDA 기본 장치(보통 첫 GPU)에서
+   시작하므로, 그 GPU가 빌려줄 수 없는 상태면 바로 옮깁니다. 같은 GPU에 스팟이 둘이면 나중에 온 쪽이 옮깁니다.
+3. **옮기기(Move)**: 붙어 있는 GPU 중 같은 모델이면서 LENDABLE이고 스팟이 없는 GPU(빌려줄 수 있는 메모리가
+   가장 큰 것)로 옮깁니다. `cuda-checkpoint --action lock → checkpoint → restore --device-map → unlock`을
+   그 세션의 GPU 프로세스마다 합니다. device-map은 원래 GPU와 대상 GPU를 맞바꾸고 나머지는 그대로 둡니다.
+   프로세스는 오류 없이 잠깐 멈췄다가 이어서 돕니다.
+4. **멈춰 두기(Park)**: 옮길 GPU가 없으면 lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는
+   CUDA 호출에서 기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore).
+   멈춰 둔 스팟은 새로 옮겨야 하는 스팟보다 먼저 자리를 받습니다.
+5. **내보내기(Evict)**: 멈춰 둔 지 `park_seconds`가 지나면 내보냅니다.
+   - 같은 모델 GPU 중 (그 스팟이 쓰던 메모리 + `mem_reserve_mib`)만큼 비어 있는 곳이 있으면 거기로 되살린 뒤,
+     컨테이너 안에 `/tmp/labgpu-spot-evicted`(사유 한 줄)를 남기고 `evict_signal`(기본 SIGINT, 파이썬에서는
+     `KeyboardInterrupt`)을 보냅니다. `evict_grace_seconds` 안에 끝나지 않으면 SIGKILL.
+   - 그런 GPU가 없으면 바로 SIGKILL합니다(파이썬 예외 없음).
+   - 세션 자체는 끝내지 않습니다. 다시 GPU를 쓰기 시작하면 규칙 2에 따라 빈 GPU로 배치됩니다.
+6. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기는 대신 GPU 위에서
+   바로 내보냅니다(5와 같은 시그널 순서). 이동이나 멈춰 두기가 실패해도 내보냅니다.
+7. GPU를 둘 이상 쓰는 스팟 세션은 내보냅니다.
+
+프로그램 쪽 권장: `KeyboardInterrupt`를 받으면 `/tmp/labgpu-spot-evicted`가 있는지 보고, 있으면 체크포인트를
+저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
 
 ---
 
@@ -347,7 +415,10 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 - `devalloc`: 두 입력 형태 정규화
 - `procmap`: cgroup v1/v2/systemd 형식 파싱
 - `detector`: 상태 전이 전부(유휴 전환, 회수 조건 각각, UNKNOWN, 재시작 직후)
-- `docker`: 소유자 컨테이너의 GPU 참조 해석 순서
+- `docker`: 소유자 컨테이너의 GPU 참조 해석 순서, 스팟 컨테이너 구분
+- `placement`: 머물기, 옮기기, 멈춰 두기, 되살리기(원래 GPU 포함), 내보내기, 겹친 스팟, 진행 중 제외
+- `daemon`: 가짜 GPU·세션·cuda-checkpoint로 옮기기, 멈춰 두기와 되살리기, `parked.json` 저장
+- `spotstatus`: 종류별 스팟 자리 수, 감시기에서 스팟을 끈 경우
 
 ### 3.2 실기 검증표
 
@@ -383,6 +454,10 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 | 에이전트 재시작 뒤 매니저가 통계를 중복 합산해도 화면 값이 맞음(capacity 1 보정) | 단위 테스트로 확인 |
 | 연구실 서버(26.8.3으로 올리는 중)에서 위 항목 전부 | UNVERIFIED |
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
+| 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
+| 감시기: 같은 GPU에 겹친 스팟을 다른 GPU로 옮김, 주인 쪽 활동에 옮길 곳이 없으면 멈춰 둠, 원래 GPU가 비면 되살림, `park_seconds` 뒤 내보냄 | 확인 (같은 환경, 가짜 cuda-checkpoint `e2e/fake_cuda_checkpoint.py`) |
+| 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
+| 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문
@@ -391,9 +466,11 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
   GPU 네 장에 흩어집니다. 스팟에 통째로 빌려줄 GPU를 남기려면 가장 덜 빈 GPU부터 고르는 할당 맵
   (`FractionAllocMap` 하위 클래스)이 필요합니다. affinity hint 처리와 충돌하지 않게 만드는 방법을 검토해야 합니다.
 
-- 스팟 실행 모드(WebUI 세션 런처)의 설계. 26.8.3 agent는 플러그인의 `available_slots`를 30초마다 다시 읽어
-  매니저에 보고하므로(`UpdateSlotsTask`) 슬롯 용량을 실행 중에 바꿀 수 있다는 점까지는 확인했습니다.
-  나머지(슬롯 형태, 회수 방법, 같은 종류 GPU로의 자동 이동)는 설계 승인 뒤에 적습니다.
+- **스팟 메모리 상한.** 스팟 세션에는 HAMi-core를 넣지 않아 GPU 메모리를 제한 없이 잡을 수 있습니다.
+  주인이 돌아와 메모리를 더 잡는 순간 GPU가 꽉 차 있으면, 이동이 끝나기 전(수 초)에 주인 쪽 할당이
+  실패할 수 있습니다. HAMi-core와 cuda-checkpoint를 함께 쓸 수 있는지 확인한 뒤 상한을 넣을지 정해야 합니다.
+- **스팟이 처음 뜨는 GPU.** 모든 같은 종류 GPU가 보이므로 스팟 프로그램은 CUDA 기본 장치에서 시작하고,
+  그곳이 빌려줄 수 없는 GPU면 감시기가 몇 초 안에 옮깁니다. 그 몇 초 동안은 주인 GPU를 함께 씁니다.
 - 소유자가 GPU 메모리를 크게 잡은 채 쉬는 경우(예: 70GB 모델 상주) 빌려줄 여유가 거의 없습니다.
   이런 GPU를 대시보드로 보여 주고 정책(세션 정리 권고)으로 풀지 결정해야 합니다.
 - 크레딧: 빌려준 GPU 시간의 소유자별 집계와 우선순위 반영은 아직 없습니다.

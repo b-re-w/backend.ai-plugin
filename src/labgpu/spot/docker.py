@@ -1,5 +1,6 @@
 """
-Find the Backend.AI session containers on this node and the GPUs they hold (SPEC 2.3).
+Find the Backend.AI session containers on this node and the GPUs they hold (SPEC 2.3), telling
+spot sessions (env `LABGPU_SPOT=1`, SPEC 2.12) apart from owners.
 
 Parsing is pure; `DockerCli` only runs `docker ps` / `docker inspect`.
 """
@@ -13,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 KERNEL_LABEL = "ai.backend.kernel-id"
+ENV_SPOT = "LABGPU_SPOT"
+ENV_SPOT_UUIDS = "LABGPU_SPOT_UUIDS"
 
 
 class DockerError(RuntimeError):
@@ -24,6 +27,13 @@ class OwnerContainer:
     id: str
     pid: int
     gpu_refs: tuple[str, ...]  # UUIDs, NVML indices, or "all"
+
+
+@dataclass(frozen=True)
+class SpotContainer:
+    id: str
+    pid: int
+    uuids: tuple[str, ...]  # every GPU attached to it: where it may run or be moved to
 
 
 def _env(inspect: Mapping[str, Any]) -> dict[str, str]:
@@ -63,6 +73,32 @@ def parse_owner(inspect: Mapping[str, Any]) -> OwnerContainer:
     )
 
 
+def is_spot(inspect: Mapping[str, Any]) -> bool:
+    return _env(inspect).get(ENV_SPOT) == "1"
+
+
+def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
+    env = _env(inspect)
+    return SpotContainer(
+        id=inspect["Id"],
+        pid=int((inspect.get("State") or {}).get("Pid") or 0),
+        uuids=tuple(u for u in env.get(ENV_SPOT_UUIDS, "").split(",") if u),
+    )
+
+
+def split_sessions(
+    inspects: Sequence[Mapping[str, Any]],
+) -> tuple[list[OwnerContainer], list[SpotContainer]]:
+    owners: list[OwnerContainer] = []
+    spots: list[SpotContainer] = []
+    for i in inspects:
+        if is_spot(i):
+            spots.append(parse_spot(i))
+        else:
+            owners.append(parse_owner(i))
+    return owners, spots
+
+
 class DockerCli:
     def __init__(self, docker: str = "docker", timeout: float = 30.0) -> None:
         self._docker = docker
@@ -84,6 +120,6 @@ class DockerCli:
             return []
         return json.loads(self._run("inspect", *ids))
 
-    def owner_containers(self) -> list[OwnerContainer]:
+    def sessions(self) -> tuple[list[OwnerContainer], list[SpotContainer]]:
         ids = self._run("ps", "-q", "--no-trunc", "--filter", f"label={KERNEL_LABEL}").split()
-        return [parse_owner(i) for i in self._inspect(ids)]
+        return split_sessions(self._inspect(ids))

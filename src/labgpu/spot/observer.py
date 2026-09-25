@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
-from .docker import OwnerContainer
+from .docker import OwnerContainer, SpotContainer
 from .model import ClassifiedProcess, GpuObservation, ProcKind
 
 log = logging.getLogger("ai.backend.labgpu.spot.observer")
@@ -37,14 +37,18 @@ def build_observation(
     all_owner_ids: set[str],
     owner_cpu: Mapping[str, float | None],
     ignored_names: Collection[str] = (),
+    spots: Mapping[str, SpotContainer] | None = None,
 ) -> GpuObservation:
-    """Classify each GPU process as owner, ignored, or unknown for this GPU."""
+    """Classify each GPU process as owner, spot, ignored, or unknown for this GPU."""
+    spots = spots or {}
     uuid = snap.info.uuid
     processes = []
     for p in snap.processes:
         cid = pid_to_container.get(p.pid)
         if cid is not None and cid in owners_on_gpu:
             kind = ProcKind.OWNER
+        elif cid is not None and cid in spots and uuid in spots[cid].uuids:
+            kind = ProcKind.SPOT
         elif cid is None and p.name and p.name in ignored_names:
             # Host-only: a container cannot escape by renaming a process (SPEC 2.1).
             kind = ProcKind.IGNORED
@@ -66,6 +70,7 @@ def build_observation(
         used_memory=snap.used_memory,
         processes=tuple(processes),
         owner_containers=frozenset(owners_on_gpu),
+        spot_containers=frozenset(p.container_id for p in processes if p.kind is ProcKind.SPOT and p.container_id),
         owner_cpu_cores=sum(measured) if measured else None,
     )
 
@@ -77,12 +82,14 @@ def observe(
     pid_mapper: Callable[[list[int]], Mapping[int, str | None]],
     owner_cpu: Mapping[str, float | None],
     ignored_names: Collection[str] = (),
+    spots: Sequence[SpotContainer] = (),
 ) -> list[GpuObservation]:
     owners_by_gpu: dict[str, dict[str, OwnerContainer]] = {g.uuid: {} for g in gpus}
     for o in owners:
         for uuid in resolve_gpu_refs(o.gpu_refs, gpus):
             owners_by_gpu[uuid][o.id] = o
     all_owner_ids = {o.id for o in owners}
+    spots_by_id = {s.id: s for s in spots}
 
     observations = []
     for g in gpus:
@@ -104,6 +111,7 @@ def observe(
                 all_owner_ids=all_owner_ids,
                 owner_cpu=owner_cpu,
                 ignored_names=ignored_names,
+                spots=spots_by_id,
             )
         )
     return observations

@@ -244,3 +244,34 @@ def test_lending_measures_per_session(fake_primary, tmp_path):
     status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale file
     keys = {str(m.key) for m in asyncio.run(p.gather_container_measures(None, ["c1"]))}
     assert "pro6000_lent" not in keys
+
+
+def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
+    import time
+
+    from labgpu.accelerator.spot_plugin import POOL_DEVICE_ID, SpotSlotPlugin1
+
+    status = tmp_path / "status.json"
+    owner = init_plugin(GpuSlotPlugin1, fake_primary, key="pro6000", model_pattern="*PRO 6000*")
+    spot = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
+                       spot_status_path=str(status))
+    assert owner.enabled and spot.enabled  # the spot plugin claims no GPU
+    slot = SlotName("pro6000-spot.device")
+    assert asyncio.run(spot.available_slots()) == {slot: Decimal(0)}  # no status yet: no room
+    status.write_text(json.dumps({"updated_at": time.time(), "gpus": [
+        {"uuid": "GPU-p6000-1", "state": "LENDABLE"},
+        {"uuid": "GPU-p6000-2", "state": "BUSY"},
+        {"uuid": "GPU-a6000", "state": "LENDABLE"},
+    ]}))
+    assert asyncio.run(spot.available_slots()) == {slot: Decimal(1)}
+    [pool] = asyncio.run(spot.list_devices())
+    assert pool.device_id == POOL_DEVICE_ID and pool.device_name == "pro6000-spot"
+    # The allocation map is sized for every GPU of the model; the manager enforces the live count.
+    amap = asyncio.run(spot.create_alloc_map())
+    alloc = amap.allocate({slot: Decimal(1)})
+    env = env_of(asyncio.run(spot.generate_docker_args(None, alloc)))
+    assert env["LABGPU_SPOT"] == "1"
+    assert env["LABGPU_SPOT_UUIDS"] == "GPU-p6000-1,GPU-p6000-2"
+    meta = spot.get_metadata()
+    assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"
+    assert asyncio.run(spot.generate_docker_args(None, {})) == {}

@@ -1,4 +1,4 @@
-"""Plain data exchanged between the observer and the detector."""
+"""Plain data exchanged between the observer, the detector, and the spot placement planner."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from enum import StrEnum
 
 class ProcKind(StrEnum):
     OWNER = "owner"
+    SPOT = "spot"  # a spot session running on a GPU it was attached to (SPEC 2.12)
     UNKNOWN = "unknown"
     IGNORED = "ignored"  # host process on the ignore list, e.g. the display server (SPEC 2.1)
 
@@ -32,6 +33,7 @@ class GpuObservation:
     used_memory: int = 0
     processes: tuple[ClassifiedProcess, ...] = ()
     owner_containers: frozenset[str] = frozenset()
+    spot_containers: frozenset[str] = frozenset()
     owner_cpu_cores: float | None = None  # None: unmeasurable, skip the CPU rule
     error: str | None = None
     model: str = ""
@@ -47,6 +49,14 @@ class GpuObservation:
     @property
     def owner_memory(self) -> int:
         return sum(p.used_memory for p in self.processes if p.kind is ProcKind.OWNER)
+
+    @property
+    def spot_memory(self) -> int:
+        return sum(p.used_memory for p in self.processes if p.kind is ProcKind.SPOT)
+
+    @property
+    def free_memory_without_spot(self) -> int:
+        return self.free_memory + self.spot_memory
 
     @property
     def has_unknown(self) -> bool:
@@ -71,6 +81,6 @@ class GpuVerdict:
     lendable: bool
     must_reclaim: bool
     reasons: tuple[str, ...] = ()
-    lendable_memory: int = 0  # bytes a new spot job may use
+    lendable_memory: int = 0  # free bytes a spot session could use
     idle_for: float = 0.0
     model: str = ""

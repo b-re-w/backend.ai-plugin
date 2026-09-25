@@ -41,7 +41,7 @@ LABEL ai.backend.kernelspec="1" \
       ai.backend.runtime-path="/usr/bin/python3" \
       ai.backend.resource.min.cpu="1" \
       ai.backend.resource.min.mem="256m" \
-      ai.backend.accelerators="cuda,pro6000,pro5000l,a6000,rtx4050" \
+      ai.backend.accelerators="cuda,pro6000,pro6000-spot,pro5000l,a6000,rtx4050" \
       ai.backend.service-ports=""
 DF
 # The manager names local-registry images "local/<repo>", while the agent reports Docker tags as-is:

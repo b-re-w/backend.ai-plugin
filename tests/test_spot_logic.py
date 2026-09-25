@@ -22,7 +22,7 @@ def obs(*, util=0, owner_mem=4 * GiB, used=None, owners=(OWNER,), cpu=0.0, unkno
         procs.append(ClassifiedProcess(3, ProcKind.UNKNOWN, None, 100 * MiB, 0))
     total_used = used if used is not None else sum(p.used_memory for p in procs)
     return GpuObservation("GPU-a", 0, ok, 40 * GiB, total_used, tuple(procs),
-                          frozenset(owners), cpu, None if ok else "boom")
+                          frozenset(owners), owner_cpu_cores=cpu, error=None if ok else "boom")
 
 
 def step(tracker, o, t, **kw):
@@ -144,7 +144,7 @@ def test_config_from_dict():
     with pytest.raises(ValueError):
         Config.from_dict({"idle": {"typo": 1}})
     with pytest.raises(ValueError):
-        Config.from_dict({"spot": {}})
+        Config.from_dict({"bogus": {}})
 
 
 # ---- ignored host processes (SPEC 2.1) ----

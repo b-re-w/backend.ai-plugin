@@ -11,7 +11,10 @@
 #   allow-compute-plugins = ["labgpu.accelerator"]
 #   block-compute-plugins = ["labgpu.accelerator.cuda_frac"]
 #   [resource]
-#   allocation-order = ["pro6000", "pro5000l", "pro5000", "a6000", "cpu", "mem"]
+#   allocation-order = ["pro6000", "pro6000-spot", "pro5000l", "pro5000l-spot", "pro5000", "pro5000-spot",
+#                       "a6000", "a6000-spot", "cpu", "mem"]
+#
+# and every kernel image offered for GPUs needs the keys in its ai.backend.accelerators label.
 set -eu
 BAI=${BAI:-backend.ai}
 HOOK=${HOOK:-/opt/labgpu/lib/libvgpu.so}
@@ -34,5 +37,20 @@ slot gpu_slot_1 pro6000  "*PRO 6000*" "PRO 6000"      PRO6000
 slot gpu_slot_2 pro5000l "*PRO 5000*" "PRO 5000 72GB" PRO5000-72 60g
 slot gpu_slot_3 pro5000  "*PRO 5000*" "PRO 5000 48GB" PRO5000-48 "" 60g
 slot gpu_slot_4 a6000    "*A6000*"    "A6000"         A6000
+
+# Spot launch mode (SPEC 2.12): one gpu_spot_N per model, same GPU selection as its owner slot.
+spot() {  # spot <entry> <key> <pattern> <display unit> [min_memory] [max_memory]
+  $BAI mgr etcd put "$P/$1/key" "$2"
+  $BAI mgr etcd put "$P/$1/model_pattern" "$3"
+  $BAI mgr etcd put "$P/$1/display_unit" "$4"
+  [ -n "${5:-}" ] && $BAI mgr etcd put "$P/$1/min_memory" "$5"
+  [ -n "${6:-}" ] && $BAI mgr etcd put "$P/$1/max_memory" "$6"
+  $BAI mgr etcd put "config/resource_slots/$2.device" count
+}
+
+spot gpu_spot_1 pro6000-spot  "*PRO 6000*" PRO6000-SPOT
+spot gpu_spot_2 pro5000l-spot "*PRO 5000*" PRO5000-72-SPOT 60g
+spot gpu_spot_3 pro5000-spot  "*PRO 5000*" PRO5000-48-SPOT "" 60g
+spot gpu_spot_4 a6000-spot    "*A6000*"    A6000-SPOT
 
 $BAI mgr etcd get --prefix "$P"

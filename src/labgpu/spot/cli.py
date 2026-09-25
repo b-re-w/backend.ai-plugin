@@ -42,13 +42,20 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     for g in status["gpus"]:
         print(
             f"{g['uuid']}  {g['state']:<10} idle {g['idle_for'] / 60:6.1f}m  "
-            f"lendable {g['lendable_memory'] >> 20:>7}MiB  {'; '.join(g['reasons'])}"
+            f"lendable {g['lendable_memory'] >> 20:>7}MiB  spot {g.get('lent_job') or '-':<12}  "
+            f"{'; '.join(g['reasons'])}"
         )
+    for p in status.get("parked", []):
+        print(f"parked {p['container']} from {p['from']} for {time.time() - p['since']:.0f}s")
+    for cid, op in status.get("busy", {}).items():
+        print(f"in progress: {op} {cid}")
+    if not status.get("can_move", True):
+        print("spot sessions cannot be moved here (see the daemon log); they are evicted instead")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="labgpu-spot", description="GPU idleness monitor for spot lending")
+    parser = argparse.ArgumentParser(prog="labgpu-spot", description="GPU idleness monitor and spot session mover")
     parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG_PATH)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("daemon", help="run the monitor")

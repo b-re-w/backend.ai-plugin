@@ -1,7 +1,7 @@
 # E2E: WSL에서 Backend.AI를 띄워 labgpu를 확인하는 스크립트
 
 WSL2(Ubuntu 24.04) + Docker Desktop에서 Backend.AI 안정판(기본 26.8.3)으로 manager·agent를 띄우고,
-labgpu 플러그인과 스팟 컨트롤러를 실제로 돌려 보는 스크립트입니다. 결과는 [SPEC 3.2](../docs/SPEC.md#32-실기-검증표)에 있습니다.
+labgpu 플러그인과 스팟 감시기를 실제로 돌려 보는 스크립트입니다. 결과는 [SPEC 3.2](../docs/SPEC.md#32-실기-검증표)에 있습니다.
 
 모든 스크립트는 WSL 안에서 `bash e2e/<script>`로 실행합니다.
 
@@ -33,6 +33,8 @@ labgpu 플러그인과 스팟 컨트롤러를 실제로 돌려 보는 스크립�
 | `13_hami.sh` | HAMi-core 빌드 (CUDA 12.4 호환 커밋) |
 | `14_real_prep.sh`, `08_agent_real.sh`, `15_real.sh` | 실제 GPU(NVML) 모드: 0.5 세션 두 개, HAMi-core 주입 확인 |
 | `16_hami_debug.sh` | HAMi-core 단독 실행 진단 (WSL에서는 segfault. SPEC 3.2 참고) |
+| `27_spot.sh setup` / `status` / `stop` | 스팟 플러그인(`gpu_spot_1`, `pro6000-spot`) 설정, 감시기 시작(가짜 cuda-checkpoint `fake_cuda_checkpoint.py`) |
+| `28_spot_scenario.sh` | 스팟 자리 수, 겹친 스팟 옮기기, 멈춰 두기, 되살리기, 내보내기 시나리오 |
 | `sync.sh` | 코드를 고친 뒤 플러그인을 다시 복사하고 테스트 실행 |
 
 `api.py`는 Backend.AI 클라이언트 SDK로 manager API를 부르고, `fakegpu.py`는 가짜 NVML 파일을 실시간으로 고칩니다.

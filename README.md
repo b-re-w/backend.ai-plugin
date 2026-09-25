@@ -6,7 +6,7 @@
 |---|---|---|
 | **부분 GPU (fGPU)** | `cuda_frac` 가속기 플러그인 | `0.5` GPU처럼 소수로 할당하고, HAMi-core로 메모리·SM 사용률을 실제로 제한합니다. |
 | **GPU 종류별 슬롯** | `gpu_slot_1~4` 가속기 플러그인 | 한 서버에 여러 종류 GPU가 있을 때 agent를 나누지 않고 `pro6000.shares`, `a6000.shares`처럼 종류마다 슬롯을 둡니다. CPU·RAM은 공용으로 유동적입니다. |
-| **스팟 대여** (만드는 중) | WebUI 세션 런처의 스팟 실행 모드 + `labgpu-spot` 유휴 감시기 | 소유자가 GPU를 안 쓰는 동안 그 GPU를 스팟 세션에 빌려주고, 소유자가 돌아오면 회수합니다. 지금은 유휴 판정까지만 있고, 실행 모드는 설계 승인 전입니다. |
+| **스팟 대여** | `gpu_spot_1~4` 플러그인 + `labgpu-spot` 감시기 | WebUI 세션 런처에서 `PRO6000-SPOT` 같은 스팟 종류를 고르면, 주인이 안 쓰는 GPU에서 세션이 돕니다. 주인이 돌아오면 같은 종류의 빈 GPU로 옮기고(cuda-checkpoint), 빈 곳이 없으면 멈춰 두었다가 이어 갑니다. |
 
 두 기능은 따로 켤 수 있습니다. 왜 만드는지는 [docs/INTENT.md](docs/INTENT.md), 정확한 동작은
 [docs/SPEC.md](docs/SPEC.md)를 보세요.
@@ -104,11 +104,19 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 
 ## 4. 스팟 대여
 
-스팟은 WebUI 세션 런처에서 고르는 실행 모드로 만듭니다(스팟 세션도 Backend.AI 세션). 설계 승인 전이라
-아직 쓸 수 없습니다. 지금 들어 있는 것은 노드마다 GPU가 소유자에게서 놀고 있는지 판정하는 감시기입니다.
+스팟은 WebUI 세션 런처에서 고르는 실행 모드입니다. 스팟 세션도 보통 Backend.AI 세션이라 세션 목록과
+사용량 통계에 그대로 보입니다. 동작 규칙은 [SPEC 2.12](docs/SPEC.md)를 보세요.
 
-1. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
-2. systemd 서비스를 등록합니다.
+**매니저에서 한 번:** [examples/per-model-slots.sh](examples/per-model-slots.sh)가 종류별 슬롯과 함께
+스팟 플러그인(`gpu_spot_1~4`, key `pro6000-spot` 등)과 슬롯(`pro6000-spot.device`)을 등록합니다.
+agent의 `allocation-order`와 이미지의 `ai.backend.accelerators` 라벨에 스팟 key도 넣어야 합니다.
+
+**GPU 노드마다:**
+
+1. cuda-checkpoint 설치(드라이버 580 이상): `sudo scripts/install_cuda_checkpoint.sh` →
+   `/opt/labgpu/bin/cuda-checkpoint`. 없으면 스팟은 옮기지 못하고 주인이 돌아올 때 내보내집니다.
+2. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
+3. systemd 서비스를 등록합니다.
 
    ```bash
    sudo cp examples/labgpu-spot.service /etc/systemd/system/
@@ -116,11 +124,21 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
    journalctl -u labgpu-spot -f
    ```
 
-3. 상태 확인: `sudo labgpu-spot status`
+4. 상태 확인: `sudo labgpu-spot status`
 
-감시기를 끄거나 지워도 Backend.AI와 소유자 세션에는 영향이 없습니다.
+감시기를 끄면 스팟 자리가 1분 안에 0이 되어 새 스팟 세션이 배정되지 않습니다. 감시기를 끄거나 지워도
+Backend.AI와 소유자 세션에는 영향이 없습니다.
 
-## 5. 소유자가 알아 둘 것 (스팟 실행 모드가 생긴 뒤)
+### 스팟 세션을 쓰는 사람이 알아 둘 것
+
+- 세션 런처의 AI 가속기 종류에서 `…-SPOT`을 고르고 1개를 요청합니다. 빈자리가 없으면 세션은 대기합니다.
+- 같은 종류 GPU가 모두 보이지만 **하나만** 쓰세요(`cuda:0`). 둘 이상 쓰면 내보내집니다.
+- 주인이 돌아오면 프로그램은 몇 초 멈췄다가 다른 GPU에서 **그대로 이어서** 돕니다. 오류는 없습니다.
+- 옮길 GPU가 없으면 GPU에서 빠진 채 멈춰 기다립니다(기본 5분). 그래도 자리가 없으면 `KeyboardInterrupt`
+  (SIGINT)를 받고, 30초 뒤 강제 종료됩니다. 이때 컨테이너 안에 `/tmp/labgpu-spot-evicted`가 생기므로,
+  직접 멈춘 것과 구분해 체크포인트를 저장하고 끝내도록 짜 두세요. 세션은 남아 있고, 다시 실행하면 빈 GPU에서 돕니다.
+
+## 5. 소유자가 알아 둘 것
 
 - 세션을 켜 둔 채 GPU를 **30분(기본)** 동안 안 쓰면 그 GPU가 스팟에 빌려질 수 있습니다. 세션은 그대로 유지됩니다.
 - GPU를 다시 쓰기 시작하면(커널 실행, 메모리 추가 할당, CPU 사용) 스팟이 회수됩니다. 회수가 끝날 때까지
@@ -142,7 +160,7 @@ pytest
 Backend.AI 소스로 돌리려면 Python 3.13 환경에 `backend.ai/requirements.txt`를 설치한 뒤
 `PYTHONPATH=src:../backend.ai/src pytest`를 실행합니다.
 
-GPU가 없어도 테스트는 돌아갑니다. 판단 로직(`labgpu.spot.detector`, `labgpu.fraction`)은
+GPU가 없어도 테스트는 돌아갑니다. 판단 로직(`labgpu.spot.detector`, `labgpu.spot.placement`, `labgpu.fraction`)은
 순수 함수이고, NVML·Docker·Backend.AI는 얇은 어댑터(`labgpu.nvml`, `labgpu.spot.docker`,
 `labgpu.accelerator.plugin`)에만 있습니다. 작업 원칙은 저장소 루트의 [AGENTS.md](../AGENTS.md)를 보세요.
 
@@ -153,8 +171,10 @@ src/labgpu/
   nvml.py            NVML 어댑터
   procmap.py         PID → 컨테이너 ID
   selection.py       GPU 종류 선택(모델명·메모리)과 중복 점유 방지
-  accelerator/plugin.py   플러그인 구현 (cuda_frac.py, gpu_slot.py는 엔트리 포인트 모듈)
+  accelerator/plugin.py        플러그인 구현 (cuda_frac.py, gpu_slot.py는 엔트리 포인트 모듈)
+  accelerator/spot_plugin.py   스팟 플러그인 (gpu_spot.py가 엔트리 포인트 모듈)
+  spotstatus.py      감시기 현황 파일 읽기 (대여 통계, 스팟 자리 수)
   spot/
-    config.py  model.py  detector.py  observer.py
-    docker.py  hostinfo.py  daemon.py  cli.py
+    config.py  model.py  detector.py  observer.py  placement.py
+    ckpt.py  docker.py  hostinfo.py  daemon.py  cli.py
 ```

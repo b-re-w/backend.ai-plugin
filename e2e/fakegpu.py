@@ -30,6 +30,21 @@ def owners() -> dict[str, str]:
     return result
 
 
+def spots() -> list[str]:
+    """Spot session containers (env LABGPU_SPOT=1), oldest first."""
+    ids = subprocess.run(
+        ["docker", "ps", "-q", "--no-trunc", "--filter", "label=ai.backend.kernel-id"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    return [
+        cid for cid in reversed(ids)
+        if "LABGPU_SPOT=1" in subprocess.run(
+            ["docker", "inspect", cid, "--format", "{{range .Config.Env}}{{println .}}{{end}}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+    ]
+
+
 match cmd:
     case "attach-owners":  # every owned GPU gets one idle owner process holding 4 GiB
         for i, (uuid, cid) in enumerate(sorted(owners().items())):
@@ -41,6 +56,12 @@ match cmd:
     case "xorg-everywhere":  # the lab's servers run /usr/lib/xorg/Xorg on every GPU
         for i, g in enumerate(data["gpus"]):
             g.setdefault("processes", []).append({"pid": 900 + i, "mem": "200m", "sm": 1, "name": "Xorg"})
+    case "spot-on":  # spot-on <n> <uuid>: the n-th spot session starts computing on that GPU
+        cid = spots()[int(sys.argv[3])]
+        by_uuid[sys.argv[4]].setdefault("processes", []).append(
+            {"pid": 2000 + int(sys.argv[3]), "mem": "20g", "sm": 90, "container": cid})
+    case "driver":  # driver <version>
+        data["driver"] = sys.argv[3]
     case "clear-stranger":
         for g in data["gpus"]:
             g["processes"] = [p for p in g.get("processes", []) if p["pid"] != 9999]

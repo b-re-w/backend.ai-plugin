@@ -1,5 +1,5 @@
 [Unit]
-Description=labgpu GPU idleness monitor for spot lending
+Description=labgpu spot monitor (GPU idleness, moves spot sessions)
 After=docker.service
 Requires=docker.service
 

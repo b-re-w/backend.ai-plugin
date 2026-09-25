@@ -66,11 +66,16 @@ class GpuTracker:
 
         if lent:
             reasons = list(activity)
-            if obs.free_memory < reclaim.mem_reserve // 2:
+            # The spot session's own memory does not count: only someone else filling the GPU does.
+            if obs.free_memory_without_spot < reclaim.mem_reserve // 2:
                 reasons.append(
-                    f"free memory {obs.free_memory >> 20}MiB < half of reserve "
+                    f"free memory {obs.free_memory_without_spot >> 20}MiB < half of reserve "
                     f"{reclaim.mem_reserve_mib}MiB"
                 )
+            # A spot session that started on a GPU which was not lendable yet must leave it.
+            wait = idle.idle_seconds if obs.owner_containers else idle.unclaimed_grace_seconds
+            if not activity and idle_for < wait:
+                reasons.append(f"owner idle for {idle_for:.0f}s < {wait:.0f}s")
             if blocked:
                 reasons.append(blocked)
             must = bool(reasons) and not reclaiming

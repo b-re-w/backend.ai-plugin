@@ -15,10 +15,15 @@ DEFAULT_STATUS_PATH = Path("/var/lib/labgpu/status.json")
 DEFAULT_MAX_AGE = 60.0
 
 
+# Monitor states in which a GPU can host a spot session (SPEC 2.4, 2.12).
+SPOT_STATES = frozenset({"LENDABLE", "LENT"})
+
+
 @dataclass(frozen=True)
 class GpuLending:
     lent: bool
     since: float | None
+    state: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,13 +43,19 @@ def parse_status(text: str, now: float, max_age: float = DEFAULT_MAX_AGE) -> dic
         return None
     if now - updated > max_age:
         return None
+    # With spot turned off in the monitor, no GPU offers room for spot sessions.
+    spot_on = data.get("spot_enabled", True) is not False
     result: dict[str, GpuLending] = {}
     for g in gpus:
         uuid = g.get("uuid")
         if not uuid:
             continue
         since = g.get("lent_since")
-        result[uuid] = GpuLending(lent=g.get("lent_job") is not None, since=float(since) if since else None)
+        result[uuid] = GpuLending(
+            lent=g.get("lent_job") is not None,
+            since=float(since) if since else None,
+            state=str(g.get("state", "")) if spot_on else "",
+        )
     return result
 
 
@@ -73,6 +84,16 @@ def session_lending(
         starts = [g.since for g in lent if g.since]
         result[cid] = SessionLending(lent=len(lent), total=len(mine), since=min(starts) if starts else 0.0)
     return result
+
+
+def spot_capacity(own_uuids: Collection[str], status: Mapping[str, GpuLending] | None) -> int:
+    """
+    How many spot sessions this GPU model can hold right now: one per GPU that is lendable or
+    already lent (SPEC 2.12). Unknown status means none (fail safe).
+    """
+    if status is None:
+        return 0
+    return sum(1 for u in own_uuids if u in status and status[u].state in SPOT_STATES)
 
 
 def uuids_from_env(env: Iterable[str]) -> list[str]:

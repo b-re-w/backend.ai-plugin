@@ -23,6 +23,10 @@ gpu_slot_1 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin1"
 gpu_slot_2 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin2"
 gpu_slot_3 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin3"
 gpu_slot_4 = "labgpu.accelerator.gpu_slot:GpuSlotPlugin4"
+gpu_spot_1 = "labgpu.accelerator.gpu_spot:SpotSlotPlugin1"
+gpu_spot_2 = "labgpu.accelerator.gpu_spot:SpotSlotPlugin2"
+gpu_spot_3 = "labgpu.accelerator.gpu_spot:SpotSlotPlugin3"
+gpu_spot_4 = "labgpu.accelerator.gpu_spot:SpotSlotPlugin4"
 
 [tool.setuptools.packages.find]
 where = ["src"]

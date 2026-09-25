@@ -46,10 +46,23 @@ class ReclaimConfig:
 
 
 @dataclass(frozen=True)
+class SpotConfig:
+    """Moving and evicting spot sessions (SPEC 2.12)."""
+
+    enabled: bool = True
+    cuda_checkpoint: Path = Path("/opt/labgpu/bin/cuda-checkpoint")
+    checkpoint_timeout_seconds: float = 60.0
+    park_seconds: float = 300.0
+    evict_signal: str = "SIGINT"
+    evict_grace_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class Config:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     reclaim: ReclaimConfig = field(default_factory=ReclaimConfig)
+    spot: SpotConfig = field(default_factory=SpotConfig)
 
     @classmethod
     def load(cls, path: Path | None) -> Self:
@@ -62,7 +75,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Self:
-        unknown = set(raw) - {"controller", "idle", "reclaim"}
+        unknown = set(raw) - {"controller", "idle", "reclaim", "spot"}
         if unknown:
             raise ValueError(f"unknown config sections: {sorted(unknown)}")
         c = {k: Path(v) if k == "state_dir" else v for k, v in raw.get("controller", {}).items()}
@@ -70,6 +83,9 @@ class Config:
             controller=_build(ControllerConfig, c),
             idle=_build(IdleConfig, _tuple_field(raw.get("idle", {}), "ignored_processes")),
             reclaim=_build(ReclaimConfig, raw.get("reclaim", {})),
+            spot=_build(SpotConfig, {
+                k: Path(v) if k == "cuda_checkpoint" else v for k, v in raw.get("spot", {}).items()
+            }),
         )
 
 
