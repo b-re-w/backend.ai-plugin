@@ -5,7 +5,7 @@
 | 기능 | 구성 요소 | 한 줄 설명 |
 |---|---|---|
 | **부분 GPU (fGPU)** | `cuda_frac` 가속기 플러그인 | `0.5` GPU처럼 소수로 할당하고, HAMi-core로 메모리·SM 사용률을 실제로 제한합니다. |
-| **GPU 종류별 슬롯** | `gpu_slot_1~4` 가속기 플러그인 | 한 서버에 여러 종류 GPU가 있을 때 agent를 나누지 않고 `pro6000.shares`, `a6000.shares`처럼 종류마다 슬롯을 둡니다. CPU·RAM은 공용으로 유동적입니다. |
+| **GPU 종류별 슬롯** | `gpu_slot_1~4` 가속기 플러그인 | 한 서버에 여러 종류 GPU가 있을 때 agent를 나누지 않고 `cuda-pro6000.shares`, `cuda-a6000.shares`처럼 종류마다 슬롯을 둡니다. CPU·RAM은 공용으로 유동적입니다. |
 | **스팟 대여** | `gpu_spot_1~4` 플러그인 + `labgpu-spot` 감시기 | WebUI 세션 런처에서 `PRO6000-SPOT` 같은 스팟 종류를 고르면, 주인이 안 쓰는 GPU에서 세션이 돕니다. 주인이 돌아오면 같은 종류의 빈 GPU로 옮기고(cuda-checkpoint), 빈 곳이 없으면 멈춰 두었다가 이어 갑니다. |
 
 두 기능은 따로 켤 수 있습니다. 왜 만드는지는 [docs/INTENT.md](docs/INTENT.md), 정확한 동작은
@@ -95,12 +95,12 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 
    [resource]
    # 새 key를 빠뜨리면 그 종류의 세션은 만들어지지 않습니다.
-   allocation-order = ["pro6000", "pro5000l", "pro5000", "a6000", "cpu", "mem"]
+   allocation-order = ["cuda-pro6000", "cuda-pro5000-72", "cuda-pro5000-48", "cuda-a6000", "cpu", "mem"]
    ```
 
 3. agent를 재시작하고 로그에서 `[gpu_slot_N] labgpu ...: key=... devices=[...]`를 확인합니다.
    Secondary처럼 해당 종류가 없는 노드에서는 그 슬롯이 0으로 보고됩니다.
-4. 이미지의 지원 가속기 목록에 새 key(`pro6000` 등)를 넣고, 자원 정책·프리셋을 종류별 슬롯으로 바꿉니다.
+4. 자원 정책·프리셋을 종류별 슬롯으로 바꿉니다. key를 `cuda-`로 시작하게 지으면 이미지 라벨을 고칠 필요가 없습니다(SPEC 1.11).
 
 ## 4. 스팟 대여
 
@@ -108,8 +108,8 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 사용량 통계에 그대로 보입니다. 동작 규칙은 [SPEC 2.12](docs/SPEC.md)를 보세요.
 
 **매니저에서 한 번:** [examples/per-model-slots.sh](examples/per-model-slots.sh)가 종류별 슬롯과 함께
-스팟 플러그인(`gpu_spot_1~4`, key `pro6000-spot` 등)과 슬롯(`pro6000-spot.device`)을 등록합니다.
-agent의 `allocation-order`와 이미지의 `ai.backend.accelerators` 라벨에 스팟 key도 넣어야 합니다.
+스팟 플러그인(`gpu_spot_1~4`, key `cuda-pro6000-spot` 등)과 슬롯(`cuda-pro6000-spot.device`)을 등록합니다.
+agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`로 시작하므로 이미지는 고치지 않아도 됩니다.
 
 **GPU 노드마다:**
 

@@ -8,7 +8,7 @@
 | 구성 요소 | 어디서 도나 | 하는 일 |
 |---|---|---|
 | `cuda_frac` 가속기 플러그인 (`labgpu.accelerator`) | 각 GPU 노드의 Backend.AI **agent** 프로세스 안 | GPU를 `cuda.shares`(소수) 단위로 할당하고, HAMi-core로 컨테이너별 GPU 메모리·SM 사용률을 제한합니다. |
-| `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`pro6000-spot.device` 등)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
+| `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`cuda-pro6000-spot.device` 등)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
 | `labgpu-spot` 감시기 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 쓰고, 스팟 세션을 옮기거나 멈춰 두거나 내보냅니다(2장). |
 | 공용 모듈 (`labgpu.fraction`, `labgpu.nvml`, `labgpu.procmap`, `labgpu.devalloc`) | 둘 다 | 할당량 계산, NVML 조회, PID→컨테이너 매핑. |
 
@@ -151,7 +151,7 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
 - 장치의 `device_name`은 플러그인 key입니다. agent의 affinity map이 이 이름으로 장치를 찾기 때문에,
   빠지면 할당 단계에서 "No suitable devices found"로 세션 생성이 실패합니다(E2E에서 발견).
 - 운영자가 할 일 (예시 스크립트: `examples/per-model-slots.sh`):
-  1. etcd `config/resource_slots`에 새 슬롯을 등록합니다(예: `pro6000.shares` → `count`). 매니저는 등록된
+  1. etcd `config/resource_slots`에 새 슬롯을 등록합니다(예: `cuda-pro6000.shares` → `count`). 매니저는 등록된
      슬롯만 WebUI에 넘깁니다. 26.x는 DB `resource_slot_types` 표에도 표시 정보를 둡니다.
   2. **agent.toml `[resource] allocation-order`에 새 key를 모두 넣습니다.** 기본값
      `["cuda", "rocm", "tpu", "cpu", "mem"]`에 없는 key가 요청되면 agent가 `ValueError: '<key>' is not in list`로
@@ -160,7 +160,13 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
      (예: allow `["labgpu.accelerator"]`, block `["labgpu.accelerator.cuda_frac"]`).
   4. 이미지의 지원 가속기 목록(`ai.backend.accelerators` 라벨 또는 관리자 화면)에 새 key를 넣습니다.
   5. idle checker의 사용률 기준을 `<key>_util`, `<key>_mem`으로 적습니다.
-  6. 자원 정책·프리셋에 종류별 슬롯(`pro6000.shares` 등)을 씁니다.
+  6. 자원 정책·프리셋에 종류별 슬롯(`cuda-pro6000.shares` 등)을 씁니다.
+- **key 이름 규칙: `cuda-`로 시작합니다**(예: `cuda-pro6000`, 스팟은 `cuda-pro6000-spot`). WebUI 세션 런처는
+  슬롯의 장치 이름(점 앞부분)이 이미지 라벨 `ai.backend.accelerators`의 항목 중 하나로 **시작하는** 가속기만
+  보여 줍니다. 연구실 이미지 라벨에는 `cuda`가 있으므로, 이렇게 지으면 이미지를 다시 빌드하거나 매니저에서
+  고치지 않아도 모든 종류와 스팟이 보입니다. 매니저는 이 라벨로 세션 생성을 막지 않습니다. WebUI가
+  `cuda`를 특별 취급하는 곳은 슬롯 이름이 정확히 `cuda.device`, `cuda.shares`일 때뿐이라 영향이 없고,
+  런처에 보이는 이름은 `display_name`, `display_unit`입니다.
 
 ### 1.13 세션별 GPU 대여 통계
 
@@ -346,8 +352,8 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 **Backend.AI 쪽 (`gpu_spot_1..4` 플러그인, `labgpu.accelerator.spot_plugin`)**
 
-- 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `pro6000-spot` →
-  `pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
+- 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
+  `cuda-pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
   `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`.
   설정하지 않은 `gpu_spot_N`은 건너뜁니다.
 - GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
@@ -367,8 +373,8 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
     `DeviceRequests`(인덱스)로 주인 GPU를 찾습니다(2.3). `DeviceIDs`를 인덱스로 넣는 것도 순정 플러그인의
     컨테이너 통계가 인덱스로만 장치를 찾기 때문입니다. 대신 "GPU 대여" 표시는 없고, 순정 플러그인은 스팟
     세션에 붙은 GPU 전체의 사용량을 그 세션 것으로 보고합니다. 이 조합은 아직 E2E로 확인하지 않았습니다.
-- agent 설정: `[resource] allocation-order`에 스팟 key를 넣어야 하고(예: `"pro6000", "pro6000-spot", ...`),
-  이미지의 `ai.backend.accelerators` 라벨에도 스팟 key가 있어야 런처가 그 이미지에서 스팟을 보여 줍니다.
+- agent 설정: `[resource] allocation-order`에 스팟 key를 넣어야 하고(예: `"cuda-pro6000", "cuda-pro6000-spot", ...`),
+  이미지 라벨은 key 이름 규칙(1.11) 덕분에 고칠 필요가 없습니다.
 
 **감시기 쪽 (`labgpu.spot.placement`, `ckpt`, `daemon`)**
 
