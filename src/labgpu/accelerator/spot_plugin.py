@@ -9,6 +9,9 @@ schedules spot sessions while there is room. Which GPU a spot session actually r
 it when the owner comes back, is the monitor's job (`labgpu.spot`); this plugin attaches every GPU
 of the model so the monitor can move the session between them with cuda-checkpoint.
 
+The monitor runs in a background thread of the agent itself, started by the first spot plugin
+that initialises (SPEC 2.13); there is no separate service.
+
 The owner-side plugin (`gpu_slot_N` or `cuda_frac`) keeps the GPUs themselves; this plugin claims
 none of them and only exposes one pool device per model.
 """
@@ -48,6 +51,8 @@ from ai.backend.common.types import (
 from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..selection import GpuSelector, validate_key
+from ..spot.config import DEFAULT_CONFIG_PATH
+from ..spot.config import Config as SpotConfigFile
 from .plugin import (
     DEVICE_CAPABILITIES,
     PROCESSING_UNITS,
@@ -83,6 +88,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
 
     _nvml: NvmlReader | FakeNvmlReader | None = None
     _gpus: list[GpuInfo] | None = None
+    _monitor: Any = None  # the BackgroundMonitor this instance started, if any
 
     @property
     def slot(self) -> SlotName:
@@ -114,6 +120,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             log.error("[%s] NVML unavailable (%s); disabled.", self.entry_name, e)
             self.enabled = False
             return
+        if str(cfg.get("monitor", "true")).lower() not in ("0", "false", "no"):
+            self._start_monitor(Path(cfg.get("monitor_config", DEFAULT_CONFIG_PATH)))
         log.info(
             "[%s] labgpu %s spot: key=%s gpus=%s",
             self.entry_name,
@@ -121,6 +129,20 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             self.key,
             [g.uuid for g in self._gpus or []],
         )
+
+    def _start_monitor(self, config_path: Path) -> None:
+        """Run the spot monitor in this agent unless another spot plugin already does (SPEC 2.13)."""
+        from ..spot.daemon import BackgroundMonitor, Controller
+        from ..spot.docker import DockerCli
+
+        def make() -> Controller:
+            cfg = SpotConfigFile.load(config_path if config_path.exists() else None)
+            return Controller(cfg, open_reader(), DockerCli())
+
+        try:
+            self._monitor = BackgroundMonitor.ensure_started(make)
+        except Exception:
+            log.exception("[%s] could not start the spot monitor; spot slots stay at 0", self.entry_name)
 
     async def _list_gpus(self) -> list[GpuInfo]:
         if self._gpus is None:
@@ -131,6 +153,9 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         return self._gpus
 
     async def cleanup(self) -> None:
+        if self._monitor is not None:
+            await asyncio.to_thread(self._monitor.stop)
+            self._monitor = None
         if self._nvml is not None:
             self._nvml.close()
 

@@ -254,7 +254,7 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     status = tmp_path / "status.json"
     owner = init_plugin(GpuSlotPlugin1, fake_primary, key="pro6000", model_pattern="*PRO 6000*")
     spot = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
-                       spot_status_path=str(status))
+                       spot_status_path=str(status), monitor="false")
     assert owner.enabled and spot.enabled  # the spot plugin claims no GPU
     slot = SlotName("pro6000-spot.device")
     assert asyncio.run(spot.available_slots()) == {slot: Decimal(0)}  # no status yet: no room

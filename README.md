@@ -112,22 +112,15 @@ agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`
 
 1. cuda-checkpoint 설치(드라이버 580 이상): 플러그인 폴더에서 `scripts/install_cuda_checkpoint.sh` →
    `.venv/bin/cuda-checkpoint` (root 불필요, 감시기가 기본으로 여기서 찾음). 없으면 스팟은 옮기지 못하고 주인이 돌아올 때 내보내집니다.
-2. [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 복사하고 값을 조정합니다.
-3. systemd 서비스를 등록합니다.
+2. agent 재시작. 감시기는 **agent 안에서** 돕니다. 처음 초기화되는 스팟 플러그인이 감시기를 백그라운드로 띄우므로
+   따로 등록할 서비스가 없습니다. agent 로그에 `spot monitor started in this process`가 보이면 됩니다.
+3. 설정을 바꾸고 싶을 때만 [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 두거나,
+   스팟 플러그인 설정 `monitor_config`로 다른 경로를 알려 줍니다. 없으면 기본값으로 돕니다.
+4. 상태 확인: `sudo <agent venv>/bin/labgpu-spot status`
 
-   서비스 파일은 `/usr/local/bin/labgpu-spot`을 실행하므로, labgpu를 설치한 가상환경의 실행 파일을 거기에 연결합니다.
-
-   ```bash
-   sudo ln -sf <labgpu를 설치한 venv>/bin/labgpu-spot /usr/local/bin/labgpu-spot
-   sudo cp examples/labgpu-spot.service /etc/systemd/system/
-   sudo systemctl daemon-reload && sudo systemctl enable --now labgpu-spot
-   journalctl -u labgpu-spot -f
-   ```
-
-4. 상태 확인: `sudo labgpu-spot status`
-
-감시기를 끄면 스팟 자리가 1분 안에 0이 되어 새 스팟 세션이 배정되지 않습니다. 감시기를 끄거나 지워도
-Backend.AI와 소유자 세션에는 영향이 없습니다.
+agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 목록은 파일(`/var/lib/labgpu/parked.json`)에 남아
+재시작 뒤 이어 받습니다. 스팟 플러그인 설정 `monitor = "false"`로 감시기를 끄면 현황 파일이 갱신되지 않아
+스팟 자리가 1분 안에 0이 됩니다.
 
 ### 스팟 세션을 쓰는 사람이 알아 둘 것
 

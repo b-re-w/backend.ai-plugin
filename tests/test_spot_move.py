@@ -249,3 +249,31 @@ def test_controller_parks_then_restores_and_persists(tmp_path):
     assert ("restore", (20,), "GPU-0", "GPU-2") in ck.calls
     c.tick(165)
     assert c.parked == {}
+
+
+def test_background_monitor_runs_once_per_process(tmp_path):
+    from labgpu.spot.daemon import BackgroundMonitor
+
+    procs = {0: []}
+    made = []
+
+    def make():
+        c, _, _ = make_controller(tmp_path, procs)
+        c.cfg = Config(controller=ControllerConfig(state_dir=tmp_path, poll_interval=0.1))
+        made.append(c)
+        return c
+
+    first = BackgroundMonitor.ensure_started(make)
+    try:
+        assert first is not None
+        assert BackgroundMonitor.ensure_started(make) is None  # a second spot plugin reuses it
+        assert len(made) == 1
+        import time
+        for _ in range(50):
+            if (tmp_path / "status.json").exists():
+                break
+            time.sleep(0.1)
+        assert json.loads((tmp_path / "status.json").read_text())["gpus"]
+    finally:
+        first.stop()
+    assert BackgroundMonitor._running is None

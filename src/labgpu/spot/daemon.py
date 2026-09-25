@@ -378,15 +378,7 @@ class Controller:
         os.replace(tmp, path)
 
 
-def run_forever(controller: Controller, *, clock: Callable[[], float] = time.time) -> None:
-    stop = threading.Event()
-
-    def _on_signal(signum: int, _frame: object) -> None:
-        log.info("received signal %d, shutting down", signum)
-        stop.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
+def _loop(controller: Controller, stop: threading.Event, clock: Callable[[], float]) -> None:
     state_dir = controller.cfg.controller.state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     controller.start()
@@ -401,3 +393,53 @@ def run_forever(controller: Controller, *, clock: Callable[[], float] = time.tim
         stop.wait(max(controller.cfg.controller.poll_interval - (clock() - started), 0.5))
     # Operations in flight finish; parked sessions stay parked and are resumed on restart.
     controller.workers.shutdown(wait=True)
+
+
+def run_forever(controller: Controller, *, clock: Callable[[], float] = time.time) -> None:
+    """Foreground loop for `labgpu-spot daemon` (development and debugging)."""
+    stop = threading.Event()
+
+    def _on_signal(signum: int, _frame: object) -> None:
+        log.info("received signal %d, shutting down", signum)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    _loop(controller, stop, clock)
+
+
+class BackgroundMonitor:
+    """
+    The monitor running in a thread of the Backend.AI agent (SPEC 2.13): started by the first
+    spot plugin that initialises, stopped when that plugin is cleaned up. One per process.
+    """
+
+    _lock = threading.Lock()
+    _running: BackgroundMonitor | None = None
+
+    def __init__(self, controller: Controller) -> None:
+        self.controller = controller
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(
+            target=_loop, args=(controller, self.stop_event, time.time), name="labgpu-spot", daemon=True
+        )
+
+    @classmethod
+    def ensure_started(cls, make: Callable[[], Controller]) -> BackgroundMonitor | None:
+        """Start the monitor unless this process already runs one; returns it only to its starter."""
+        with cls._lock:
+            if cls._running is not None:
+                return None
+            monitor = cls(make())
+            monitor.thread.start()
+            cls._running = monitor
+            log.info("spot monitor started in this process")
+            return monitor
+
+    def stop(self, timeout: float = 30.0) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout)
+        with self._lock:
+            if BackgroundMonitor._running is self:
+                BackgroundMonitor._running = None
+        log.info("spot monitor stopped")

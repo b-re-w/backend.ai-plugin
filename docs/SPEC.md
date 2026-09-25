@@ -9,7 +9,7 @@
 |---|---|---|
 | `cuda_frac` 가속기 플러그인 (`labgpu.accelerator`) | 각 GPU 노드의 Backend.AI **agent** 프로세스 안 | GPU를 `cuda.shares`(소수) 단위로 할당하고, HAMi-core로 컨테이너별 GPU 메모리·SM 사용률을 제한합니다. |
 | `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`cuda-pro6000-spot.device` 등)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
-| `labgpu-spot` 감시기 (`labgpu.spot`) | 각 GPU 노드의 별도 systemd 서비스 (root) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 쓰고, 스팟 세션을 옮기거나 멈춰 두거나 내보냅니다(2장). |
+| `labgpu-spot` 감시기 (`labgpu.spot`) | 각 GPU 노드의 agent 프로세스 안 백그라운드 스레드 (root, 2.13) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 쓰고, 스팟 세션을 옮기거나 멈춰 두거나 내보냅니다(2장). |
 | 공용 모듈 (`labgpu.fraction`, `labgpu.nvml`, `labgpu.procmap`, `labgpu.devalloc`) | 둘 다 | 할당량 계산, NVML 조회, PID→컨테이너 매핑. |
 
 두 구성 요소는 **서로 독립적**입니다. 플러그인만 써도(fGPU만), 감시기만 써도(오픈소스 `cuda`
@@ -318,7 +318,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 | 명령 | 동작 |
 |---|---|
-| `labgpu-spot daemon [-c spot.toml]` | 감시기 실행 (systemd용, root) |
+| `labgpu-spot daemon [-c spot.toml]` | 감시기를 앞에서 실행 (개발·디버깅용. 운영에서는 agent 안에서 돕니다, 2.13) |
 | `labgpu-spot status` | GPU별 상태와 그 위의 스팟, 멈춰 둔 스팟, 진행 중인 작업 |
 
 
@@ -355,7 +355,8 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 - 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
   `cuda-pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
-  `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`.
+  `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`,
+  `monitor`(기본 `true`, 2.13), `monitor_config`(기본 `/etc/labgpu/spot.toml`, 없으면 기본값).
   설정하지 않은 `gpu_spot_N`은 건너뜁니다.
 - GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
 - 장치는 종류마다 가상 장치 하나(`spot`)입니다. agent는 할당 맵을 시작할 때 한 번만 만들기 때문에
@@ -403,6 +404,19 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 프로그램 쪽 권장: `KeyboardInterrupt`를 받으면 `/tmp/labgpu-spot-evicted`가 있는지 보고, 있으면 체크포인트를
 저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
+
+
+### 2.13 감시기 실행 위치
+
+감시기는 별도 서비스가 아니라 **Backend.AI agent 프로세스 안의 백그라운드 스레드**로 돕니다.
+
+- 처음 초기화되는 `gpu_spot_N` 플러그인이 띄우고(`BackgroundMonitor`), 같은 프로세스의 다른 스팟 플러그인은
+  그것을 그대로 씁니다. 띄운 플러그인의 `cleanup`(agent 종료) 때 멈춥니다. 진행 중인 이동은 끝낸 뒤 멈춥니다.
+- agent가 root로 돌기 때문에 cuda-checkpoint, 다른 사용자 프로세스에 대한 시그널, `/proc` 읽기가 그대로 됩니다.
+- 설정은 `monitor_config` 파일(기본 `/etc/labgpu/spot.toml`)이 있으면 읽고, 없으면 기본값(2.2)입니다.
+  `monitor = "false"`면 띄우지 않습니다(현황 파일이 오래되어 스팟 자리가 0이 됩니다).
+- agent를 재시작하는 동안에는 감시가 멈춥니다. 멈춰 둔 스팟 목록은 `parked.json`으로 이어 받습니다(2.10).
+- 감시기를 띄우지 못하면 ERROR를 남기고, 현황 파일이 없으니 스팟 자리는 0입니다.
 
 ---
 
