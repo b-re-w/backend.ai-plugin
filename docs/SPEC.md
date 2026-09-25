@@ -355,10 +355,18 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   할당 맵 용량은 그 종류 GPU 수로 둡니다. 대신 `available_slots`가 **지금 LENDABLE이거나 LENT인 그 종류
   GPU 수**를 보고하고(현황 파일, 없거나 오래됐으면 0), agent가 30초마다 이를 매니저에 다시 알리므로
   매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은 대기(PENDING)합니다.
-- 스팟 컨테이너에는 **그 종류 GPU를 모두** 붙이고(`DeviceRequests`) `LABGPU_SPOT=1`,
+- 스팟 컨테이너에는 **그 종류 GPU를 모두** 붙이고(`DeviceRequests`, NVML 인덱스) `LABGPU_SPOT=1`,
   `LABGPU_SPOT_UUIDS=<그 종류 GPU UUID 목록>`을 넣습니다. 다른 GPU로 옮기려면 대상 GPU가 프로세스에
   보여야 하기 때문입니다(cuda-checkpoint 제약). HAMi-core는 넣지 않습니다.
 - 스팟 세션의 GPU 사용량 통계는 주인 쪽 플러그인이 프로세스 단위로 그 세션에 매깁니다(1.9).
+- **주인 쪽 플러그인은 둘 중 하나**입니다.
+  - labgpu 종류별 슬롯(`gpu_slot_N`) 또는 `cuda_frac`: 1.13의 "GPU 대여" 표시와 스팟 세션의 프로세스 단위
+    GPU 통계까지 됩니다. 확인한 조합입니다(3.2).
+  - 순정 `cuda` 플러그인(`cuda.device`)을 그대로 두고 `gpu_spot_N`만 추가: 스팟 플러그인은 GPU를 차지하지
+    않고 장치 key도 달라 할당이 겹치지 않으며, 감시기는 순정 플러그인의 `NVIDIA_VISIBLE_DEVICES`나
+    `DeviceRequests`(인덱스)로 주인 GPU를 찾습니다(2.3). `DeviceIDs`를 인덱스로 넣는 것도 순정 플러그인의
+    컨테이너 통계가 인덱스로만 장치를 찾기 때문입니다. 대신 "GPU 대여" 표시는 없고, 순정 플러그인은 스팟
+    세션에 붙은 GPU 전체의 사용량을 그 세션 것으로 보고합니다. 이 조합은 아직 E2E로 확인하지 않았습니다.
 - agent 설정: `[resource] allocation-order`에 스팟 key를 넣어야 하고(예: `"pro6000", "pro6000-spot", ...`),
   이미지의 `ai.backend.accelerators` 라벨에도 스팟 key가 있어야 런처가 그 이미지에서 스팟을 보여 줍니다.
 
@@ -456,6 +464,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
 | 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
 | 감시기: 같은 GPU에 겹친 스팟을 다른 GPU로 옮김, 주인 쪽 활동에 옮길 곳이 없으면 멈춰 둠, 원래 GPU가 비면 되살림, `park_seconds` 뒤 내보냄 | 확인 (같은 환경, 가짜 cuda-checkpoint `e2e/fake_cuda_checkpoint.py`) |
+| 순정 `cuda` 플러그인(`cuda.device`) + `gpu_spot_N` 조합 | UNVERIFIED |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
 | 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |

@@ -191,9 +191,12 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         args: dict[str, Any] = {"Env": [f"{k}={v}" for k, v in env.items()]}
         if not self.is_fake:
             # Every GPU of the model is attached so the monitor can move the session (SPEC 2.12).
+            # NVML indices, not UUIDs: the stock cuda plugin looks DeviceIDs up by index when it
+            # gathers container stats and fails on anything else.
+            indices = [str(g.index) for g in self._gpus or []]
             args["HostConfig"] = {
                 "DeviceRequests": [
-                    {"Driver": "nvidia", "DeviceIDs": uuids, "Capabilities": DEVICE_CAPABILITIES}
+                    {"Driver": "nvidia", "DeviceIDs": indices, "Capabilities": DEVICE_CAPABILITIES}
                 ],
             }
         return args
