@@ -31,10 +31,12 @@
 
 ## 2. 설치
 
-agent가 쓰는 파이썬 환경에 설치합니다.
+agent가 쓰는 파이썬 환경에 이 체크아웃을 **editable(`-e`)** 로 설치합니다. 플러그인이 HAMi-core와
+cuda-checkpoint를 체크아웃의 `.venv`에서 찾기 때문입니다(`-e` 없이 설치하면 `hook_path`와 `cuda_checkpoint`를 직접 적어야 합니다).
 
 ```bash
-<agent-venv>/bin/pip install /path/to/backend.ai-plugin
+<agent-venv>/bin/pip install -e /path/to/backend.ai-plugin
+cd /path/to/backend.ai-plugin && scripts/install_hami_core.sh && scripts/install_cuda_checkpoint.sh
 ```
 
 ## 3. 부분 GPU(fGPU) 켜기
