@@ -17,7 +17,7 @@
 # and every kernel image offered for GPUs needs the keys in its ai.backend.accelerators label.
 set -eu
 BAI=${BAI:-backend.ai}
-HOOK=${HOOK:-/opt/labgpu/lib/libvgpu.so}
+HOOK=${HOOK:-}   # empty: the plugins use <plugin checkout>/.venv/lib/libvgpu.so
 P=config/plugins/accelerator
 
 # display_unit is what the WebUI session launcher shows in its accelerator-type selector,
@@ -27,7 +27,7 @@ slot() {  # slot <entry> <key> <pattern> <display name> <display unit> [min_memo
   $BAI mgr etcd put "$P/$1/model_pattern" "$3"
   $BAI mgr etcd put "$P/$1/display_name" "$4"
   $BAI mgr etcd put "$P/$1/display_unit" "$5"
-  $BAI mgr etcd put "$P/$1/hook_path" "$HOOK"
+  if [ -n "$HOOK" ]; then $BAI mgr etcd put "$P/$1/hook_path" "$HOOK"; else $BAI mgr etcd delete "$P/$1/hook_path" || true; fi
   [ -n "${6:-}" ] && $BAI mgr etcd put "$P/$1/min_memory" "$6"
   [ -n "${7:-}" ] && $BAI mgr etcd put "$P/$1/max_memory" "$7"
   $BAI mgr etcd put "config/resource_slots/$2.shares" count

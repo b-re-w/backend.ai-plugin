@@ -55,7 +55,7 @@
 | `shares_per_device` | `"1"` | GPU 1장이 몇 share인지. 기본은 **1 share = GPU 1장**이라 `0.5`는 반 장입니다. |
 | `quantum_size` | `"0.05"` | 할당 최소 단위 |
 | `allocation_strategy` | `"fill"` | Backend.AI `FractionAllocMap`의 전략. `"fill"`은 요청 하나를 가장 여유 있는 GPU부터 채워 **최소한의 GPU에** 담습니다. `"evenly"`는 요청을 여러 GPU에 고르게 쪼갭니다(1.0 → 0.5+0.5). 주의: 두 전략 모두 **서로 다른 세션을 한 GPU에 모아 담지는 않습니다**(4.열린 질문 참고). |
-| `hook_path` | `"/opt/labgpu/lib/libvgpu.so"` | 호스트의 HAMi-core 라이브러리 경로 |
+| `hook_path` | `<플러그인 체크아웃>/.venv/lib/libvgpu.so` | 호스트의 HAMi-core 라이브러리 경로. `scripts/install_hami_core.sh`가 root 없이 여기에 빌드해 넣습니다(Docker 안에서 빌드, HAMi-core 커밋 고정) |
 | `reserved_memory` | `"0"` | 분할 할당 시 GPU별로 메모리 상한에서 빼 둘 바이트 수(CUDA 컨텍스트 여유분) |
 | `sm_limit` | `"true"` | SM 사용률 제한(`CUDA_DEVICE_SM_LIMIT`)을 걸지 여부 |
 | `device_mask` | 없음 | 쉼표로 구분한 GPU UUID 목록. 이 GPU들은 Backend.AI에 노출하지 않습니다. |

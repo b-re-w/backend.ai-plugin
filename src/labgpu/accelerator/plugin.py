@@ -64,6 +64,7 @@ except ImportError:
 
 from .. import __version__, devalloc, spotstatus
 from ..fraction import build_hami_environ, compute_limits
+from ..paths import default_hook_path
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..selection import GpuSelector, claim_gpus, validate_key
 
@@ -119,7 +120,7 @@ class LabGpuPlugin(AbstractComputePlugin):
     shares_per_device: Decimal = Decimal(1)
     quantum_size: Decimal = Decimal("0.05")
     allocation_strategy: str = "fill"
-    hook_path: Path = Path("/opt/labgpu/lib/libvgpu.so")
+    hook_path: Path = default_hook_path()
     reserved_memory: int = 0
     sm_limit: bool = True
 
@@ -225,7 +226,7 @@ class LabGpuPlugin(AbstractComputePlugin):
         self.allocation_strategy = str(cfg.get("allocation_strategy", "fill")).lower()
         if self.allocation_strategy not in ("fill", "evenly"):
             raise ValueError(f"invalid allocation_strategy: {self.allocation_strategy}")
-        self.hook_path = Path(cfg.get("hook_path", "/opt/labgpu/lib/libvgpu.so"))
+        self.hook_path = Path(cfg["hook_path"]) if cfg.get("hook_path") else default_hook_path()
         self.reserved_memory = int(cfg.get("reserved_memory", "0"))
         self.sm_limit = str(cfg.get("sm_limit", "true")).lower() in ("1", "true", "yes")
         self.spot_status_path = Path(cfg.get("spot_status_path", spotstatus.DEFAULT_STATUS_PATH))

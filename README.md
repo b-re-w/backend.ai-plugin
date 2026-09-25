@@ -22,15 +22,12 @@
 
 - Backend.AI agent 26.8.3, Docker + NVIDIA Container Toolkit
 - Python 3.12 이상 (agent와 같은 가상환경)
-- **HAMi-core** `libvgpu.so`: 직접 빌드해서 `/opt/labgpu/lib/libvgpu.so`에 둡니다. 노드의 CUDA 툴킷에 맞는
-  커밋을 고르세요. HAMi-core 최신판은 CUDA 12.5 이상 헤더가 필요하고, CUDA 12.4라면 `6b92be9`로 빌드됩니다.
-
-  ```bash
-  docker run --rm -v /opt/labgpu/lib:/out nvidia/cuda:12.4.1-devel-ubuntu22.04 bash -c '
-    apt-get update && apt-get install -y git cmake &&
-    git clone https://github.com/Project-HAMi/HAMi-core.git /src && cd /src &&
-    git checkout 6b92be9 && make && cp build/libvgpu.so /out/'
-  ```
+- 이 저장소 체크아웃. 외부 도구는 체크아웃 안의 `.venv`에 root 없이 설치하고, 플러그인과 감시기가 기본으로
+  거기서 찾습니다.
+  - **HAMi-core** (`libvgpu.so`): GPU를 소수로 나눠 줄 때 세션마다 GPU 메모리와 SM 사용률을 실제로 제한하는
+    라이브러리입니다. `scripts/install_hami_core.sh` → `.venv/lib/libvgpu.so` (Docker의 CUDA 이미지 안에서
+    고정 커밋으로 빌드). 없으면 플러그인이 ERROR를 남기고 장 단위(`<key>.device`) 슬롯으로 돌아갑니다.
+  - **cuda-checkpoint**: 스팟을 옮길 때 씁니다(4장). `scripts/install_cuda_checkpoint.sh` → `.venv/bin/cuda-checkpoint`.
 
 ## 2. 설치
 
@@ -64,7 +61,7 @@ agent가 쓰는 파이썬 환경에 설치합니다.
    | `shares_per_device` | `1` | GPU 1장 = 1 share |
    | `quantum_size` | `0.05` | 최소 할당 단위 |
    | `allocation_strategy` | `fill` | 요청 하나를 최소한의 GPU에 담음 (`evenly`는 여러 GPU로 쪼갬) |
-   | `hook_path` | `/opt/labgpu/lib/libvgpu.so` | HAMi-core 위치 |
+   | `hook_path` | `<체크아웃>/.venv/lib/libvgpu.so` | HAMi-core 위치 (`scripts/install_hami_core.sh`) |
    | `sm_limit` | `true` | SM 사용률 제한 여부 |
 
 3. **agent 재시작.** 로그에 `mode=fractional enforced=True`가 보이면 성공입니다.

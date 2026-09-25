@@ -2,26 +2,15 @@
 
 from __future__ import annotations
 
-import shutil
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Self
 
+from ..paths import default_cuda_checkpoint
 from ..sizes import MiB
 
 DEFAULT_CONFIG_PATH = Path("/etc/labgpu/spot.toml")
-# Where scripts/install_cuda_checkpoint.sh puts the tool: the plugin checkout's own .venv/bin.
-REPO_DIR = Path(__file__).resolve().parents[3]
-
-
-def default_cuda_checkpoint() -> Path:
-    """<plugin checkout>/.venv/bin/cuda-checkpoint, else whatever is on PATH (SPEC 2.2)."""
-    local = REPO_DIR / ".venv" / "bin" / "cuda-checkpoint"
-    if local.exists():
-        return local
-    found = shutil.which("cuda-checkpoint")
-    return Path(found) if found else local
 
 
 @dataclass(frozen=True)
