@@ -11,7 +11,7 @@
 #   allow-compute-plugins = ["labgpu.accelerator"]
 #   block-compute-plugins = ["labgpu.accelerator.cuda_frac"]
 #   [resource]
-#   allocation-order = ["cuda-pro6000", "cuda-pro6000-spot", "cuda-pro5000-72", "cuda-pro5000-72-spot", "cuda-pro5000-48", "cuda-pro5000-48-spot",
+#   allocation-order = ["cuda-pro6000", "cuda-pro6000-spot", "cuda-pro5000-72", "cuda-pro5000-72-spot", "cuda-pro5000", "cuda-pro5000-spot",
 #                       "cuda-a6000", "cuda-a6000-spot", "cpu", "mem"]
 #
 # and every kernel image offered for GPUs needs the keys in its ai.backend.accelerators label.
@@ -35,7 +35,7 @@ slot() {  # slot <entry> <key> <pattern> <display name> <display unit> [min_memo
 
 slot gpu_slot_1 cuda-pro6000  "*PRO 6000*" "PRO 6000"      PRO6000
 slot gpu_slot_2 cuda-pro5000-72 "*PRO 5000*" "PRO 5000 72GB" PRO5000-72 60g
-slot gpu_slot_3 cuda-pro5000-48  "*PRO 5000*" "PRO 5000 48GB" PRO5000-48 "" 60g
+slot gpu_slot_3 cuda-pro5000  "*PRO 5000*" "PRO 5000"      PRO5000    "" 60g
 slot gpu_slot_4 cuda-a6000    "*A6000*"    "A6000"         A6000
 
 # Spot launch mode (SPEC 2.12): one gpu_spot_N per model, same GPU selection as its owner slot.
@@ -50,7 +50,7 @@ spot() {  # spot <entry> <key> <pattern> <display unit> [min_memory] [max_memory
 
 spot gpu_spot_1 cuda-pro6000-spot  "*PRO 6000*" PRO6000-SPOT
 spot gpu_spot_2 cuda-pro5000-72-spot "*PRO 5000*" PRO5000-72-SPOT 60g
-spot gpu_spot_3 cuda-pro5000-48-spot  "*PRO 5000*" PRO5000-48-SPOT "" 60g
+spot gpu_spot_3 cuda-pro5000-spot  "*PRO 5000*" PRO5000-SPOT "" 60g
 spot gpu_spot_4 cuda-a6000-spot    "*A6000*"    A6000-SPOT
 
 $BAI mgr etcd get --prefix "$P"

@@ -35,7 +35,7 @@ def test_selector_by_model_and_memory():
 
 def test_validate_key():
     assert validate_key("pro6000") == "pro6000"
-    for key in ("cuda-pro6000", "cuda-pro5000-72", "cuda-pro5000-48-spot"):  # SPEC 1.11 naming
+    for key in ("cuda-pro6000", "cuda-pro5000-72", "cuda-pro5000-spot"):  # SPEC 1.11 naming
         assert validate_key(key) == key
     for bad in ("PRO6000", "a.b", "", "cpu", "-x"):
         with pytest.raises(ValueError):

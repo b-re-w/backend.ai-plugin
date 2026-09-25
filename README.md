@@ -95,7 +95,7 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 
    [resource]
    # 새 key를 빠뜨리면 그 종류의 세션은 만들어지지 않습니다.
-   allocation-order = ["cuda-pro6000", "cuda-pro5000-72", "cuda-pro5000-48", "cuda-a6000", "cpu", "mem"]
+   allocation-order = ["cuda-pro6000", "cuda-pro5000-72", "cuda-pro5000", "cuda-a6000", "cpu", "mem"]
    ```
 
 3. agent를 재시작하고 로그에서 `[gpu_slot_N] labgpu ...: key=... devices=[...]`를 확인합니다.
