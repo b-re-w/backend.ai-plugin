@@ -1,8 +1,8 @@
-# /etc/labgpu/spot.toml (see docs/SPEC.md section 2.2)
+# <plugin checkout>/.venv/labgpu/spot.toml (optional; see docs/SPEC.md section 2.2)
 
 [controller]
 poll_interval = 5
-state_dir = "/var/lib/labgpu"
+# state_dir = "<plugin checkout>/.venv/labgpu"   # status.json, parked.json
 
 [idle]
 idle_minutes = 30

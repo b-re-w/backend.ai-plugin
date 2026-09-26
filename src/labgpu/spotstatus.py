@@ -11,7 +11,9 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_STATUS_PATH = Path("/var/lib/labgpu/status.json")
+from .paths import STATE_DIR
+
+DEFAULT_STATUS_PATH = STATE_DIR / "status.json"
 DEFAULT_MAX_AGE = 60.0
 
 

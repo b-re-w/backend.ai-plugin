@@ -380,8 +380,13 @@ class Controller:
 
 def _loop(controller: Controller, stop: threading.Event, clock: Callable[[], float]) -> None:
     state_dir = controller.cfg.controller.state_dir
-    state_dir.mkdir(parents=True, exist_ok=True)
-    controller.start()
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        controller.start()
+    except Exception:
+        # Without a status file the spot plugins report no room: spot stays off, owners unaffected.
+        log.exception("spot monitor cannot start (state_dir %s); spot slots stay at 0", state_dir)
+        return
     status_path = state_dir / "status.json"
     while not stop.is_set():
         started = clock()

@@ -116,11 +116,11 @@ agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`
    `.venv/bin/cuda-checkpoint` (root 불필요, 감시기가 기본으로 여기서 찾음). 없으면 스팟은 옮기지 못하고 주인이 돌아올 때 내보내집니다.
 2. agent 재시작. 감시기는 **agent 안에서** 돕니다. 처음 초기화되는 스팟 플러그인이 감시기를 백그라운드로 띄우므로
    따로 등록할 서비스가 없습니다. agent 로그에 `spot monitor started in this process`가 보이면 됩니다.
-3. 설정을 바꾸고 싶을 때만 [examples/spot.toml](examples/spot.toml)을 `/etc/labgpu/spot.toml`로 두거나,
+3. 설정을 바꾸고 싶을 때만 [examples/spot.toml](examples/spot.toml)을 `.venv/labgpu/spot.toml`로 두거나,
    스팟 플러그인 설정 `monitor_config`로 다른 경로를 알려 줍니다. 없으면 기본값으로 돕니다.
 4. 상태 확인: `sudo <agent venv>/bin/labgpu-spot status`
 
-agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 목록은 파일(`/var/lib/labgpu/parked.json`)에 남아
+agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 목록은 파일(`.venv/labgpu/parked.json`)에 남아
 재시작 뒤 이어 받습니다. 스팟 플러그인 설정 `monitor = "false"`로 감시기를 끄면 현황 파일이 갱신되지 않아
 스팟 자리가 1분 안에 0이 됩니다.
 
@@ -141,7 +141,7 @@ agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 
 - 모델을 GPU 메모리에 올려 둔 채 쉬면, 그 메모리는 건드리지 않고 **남는 메모리만** 빌려줍니다.
 - 서버에서 Backend.AI를 거치지 않고 GPU를 직접 쓰면(직접 `python` 실행, `docker run --gpus` 등) 그 GPU의
   스팟은 회수됩니다. 누구의 작업인지 알 수 없어 주인 쪽으로 판단하기 때문입니다. 화면 서버(`Xorg`)처럼
-  늘 떠 있는 프로그램은 `/etc/labgpu/spot.toml`의 `ignored_processes`에 넣어 예외로 둡니다(기본값 `["Xorg"]`).
+  늘 떠 있는 프로그램은 `.venv/labgpu/spot.toml`의 `ignored_processes`에 넣어 예외로 둡니다(기본값 `["Xorg"]`).
 - 같은 GPU를 쓰는 프로세스끼리는 GPU 하드웨어 오류(Xid)가 번질 수 있습니다. 드물지만 알고 계세요.
 
 ## 6. 개발

@@ -7,16 +7,16 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Self
 
-from ..paths import default_cuda_checkpoint
+from ..paths import CONFIG_PATH, STATE_DIR, default_cuda_checkpoint
 from ..sizes import MiB
 
-DEFAULT_CONFIG_PATH = Path("/etc/labgpu/spot.toml")
+DEFAULT_CONFIG_PATH = CONFIG_PATH
 
 
 @dataclass(frozen=True)
 class ControllerConfig:
     poll_interval: float = 5.0
-    state_dir: Path = Path("/var/lib/labgpu")
+    state_dir: Path = STATE_DIR
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,12 @@ REPO_DIR = Path(__file__).resolve().parents[2]
 VENV_DIR = REPO_DIR / ".venv"
 
 
+# Monitor state (status.json, parked.json) and its optional config, writable without root:
+# the agent may run as an ordinary user (SPEC 2.13).
+STATE_DIR = VENV_DIR / "labgpu"
+CONFIG_PATH = STATE_DIR / "spot.toml"
+
+
 def default_hook_path() -> Path:
     """HAMi-core library the plugins inject (SPEC 1.2 `hook_path`)."""
     return VENV_DIR / "lib" / "libvgpu.so"
