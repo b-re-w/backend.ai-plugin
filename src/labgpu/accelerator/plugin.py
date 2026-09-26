@@ -64,7 +64,7 @@ except ImportError:
 
 from .. import __version__, devalloc, spotstatus
 from ..fraction import build_hami_environ, compute_limits
-from ..paths import default_hook_path
+from ..paths import agent_state_dir, default_hook_path
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..selection import GpuSelector, claim_gpus, validate_key
 
@@ -125,7 +125,7 @@ class LabGpuPlugin(AbstractComputePlugin):
     sm_limit: bool = True
 
     _nvml: NvmlReader | FakeNvmlReader | None = None
-    spot_status_path: Path = spotstatus.DEFAULT_STATUS_PATH
+    spot_status_path: Path = Path("./var/lib/backend.ai/labgpu") / spotstatus.STATUS_FILE
     spot_status_max_age: float = spotstatus.DEFAULT_MAX_AGE
     _container_gpus: dict[str, list[str]] | None = None
     _devices: list[CUDAFracDevice] | None = None
@@ -229,7 +229,11 @@ class LabGpuPlugin(AbstractComputePlugin):
         self.hook_path = Path(cfg["hook_path"]) if cfg.get("hook_path") else default_hook_path()
         self.reserved_memory = int(cfg.get("reserved_memory", "0"))
         self.sm_limit = str(cfg.get("sm_limit", "true")).lower() in ("1", "true", "yes")
-        self.spot_status_path = Path(cfg.get("spot_status_path", spotstatus.DEFAULT_STATUS_PATH))
+        self.spot_status_path = (
+            Path(cfg["spot_status_path"])
+            if cfg.get("spot_status_path")
+            else agent_state_dir(self.local_config) / spotstatus.STATUS_FILE
+        )
         self.spot_status_max_age = float(cfg.get("spot_status_max_age", spotstatus.DEFAULT_MAX_AGE))
         if self.shares_per_device <= 0 or self.quantum_size <= 0:
             raise ValueError("shares_per_device and quantum_size must be positive")

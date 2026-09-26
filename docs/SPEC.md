@@ -185,7 +185,7 @@ WebUI 세션 세부 화면(5장)이 "내 GPU가 지금 스팟에 빌려 나가 �
 곧 중복 배수 k가 되므로, 화면은 모든 값을 k로 나눠 원래 값을 되살립니다.
 
 - 출처는 같은 노드 스팟 컨트롤러의 현황 파일입니다. 설정 키 `spot_status_path`(기본
-  `<체크아웃>/.venv/labgpu/status.json`)로 위치를 바꿀 수 있습니다.
+  agent `[agent] var-base-path` 아래 `labgpu/status.json`)로 위치를 바꿀 수 있습니다.
 - 파일이 없거나 60초보다 오래됐으면(`spot_status_max_age`) 두 통계를 **보고하지 않습니다**. 모르는 상태를
   "빌려주지 않음"으로 보여 주지 않기 위해서입니다.
 - 세션이 받은 GPU는 컨테이너 환경변수 `LABGPU_DEVICE_UUIDS`로 알아냅니다(컨테이너별로 한 번만 조회해 기억).
@@ -232,12 +232,17 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
   회수됩니다. 이름은 `/proc/<pid>/comm`으로 비교하며, 컨테이너 안의 프로세스는 이름이 같아도 무시하지
   않습니다(컨테이너가 이름만 바꿔 빠져나가지 못하게).
 
-### 2.2 설정 파일 `<체크아웃>/.venv/labgpu/spot.toml` (없어도 됨)
+### 2.2 감시기 설정
+
+Backend.AI의 다른 플러그인 설정처럼 **etcd**에 둡니다. 감시기를 띄우는 스팟 플러그인의 설정 아래
+`monitor/<구역>/<키>`입니다(예: `config/plugins/accelerator/gpu_spot_1/monitor/idle/idle_minutes` = `"30"`).
+값은 모두 문자열로 넣으며, 목록(`ignored_processes`)은 쉼표로 구분합니다. 넣지 않은 키는 아래 기본값입니다.
+개발용 `labgpu-spot` CLI는 같은 구역을 TOML 파일(`-c`)로도 읽습니다.
 
 ```toml
 [controller]
 poll_interval = 5            # 초
-state_dir = "<체크아웃>/.venv/labgpu"   # 기본값. root 없이 쓸 수 있는 곳
+state_dir = "<var-base-path>/labgpu"   # 기본값: agent의 [agent] var-base-path 아래 (2.13)
 
 [idle]
 idle_minutes = 30            # 소유자가 이만큼 연속으로 쉬어야 빌려줌
@@ -356,7 +361,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 - 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
   `cuda-pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
   `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`,
-  `monitor`(기본 `true`, 2.13), `monitor_config`(기본 `<체크아웃>/.venv/labgpu/spot.toml`, 없으면 기본값).
+  `monitor_enabled`(기본 `true`, 2.13), `monitor/<구역>/<키>`(감시기 설정, 2.2).
   설정하지 않은 `gpu_spot_N`은 건너뜁니다.
 - GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
 - 장치는 종류마다 가상 장치 하나(`spot`)입니다. agent는 할당 맵을 시작할 때 한 번만 만들기 때문에
@@ -421,9 +426,10 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 - 처음 초기화되는 `gpu_spot_N` 플러그인이 띄우고(`BackgroundMonitor`), 같은 프로세스의 다른 스팟 플러그인은
   그것을 그대로 씁니다. 띄운 플러그인의 `cleanup`(agent 종료) 때 멈춥니다. 진행 중인 이동은 끝낸 뒤 멈춥니다.
 - agent가 root로 돌기 때문에 cuda-checkpoint, 다른 사용자 프로세스에 대한 시그널, `/proc` 읽기가 그대로 됩니다.
-- 설정은 `monitor_config` 파일(기본 `<체크아웃>/.venv/labgpu/spot.toml`)이 있으면 읽고, 없으면 기본값(2.2)입니다.
-  agent가 root가 아닌 계정으로 돌 수 있으므로 상태와 설정은 모두 체크아웃 안에 둡니다.
-  `monitor = "false"`면 띄우지 않습니다(현황 파일이 오래되어 스팟 자리가 0이 됩니다).
+- 설정은 그 스팟 플러그인의 etcd `monitor/…`(2.2)에서 읽습니다.
+- 상태 파일(`status.json`, `parked.json`)은 Backend.AI 관례대로 agent의 `[agent] var-base-path` 아래 `labgpu/`에
+  둡니다. agent가 자기 상태를 두는 곳이라, agent를 어느 계정으로 돌리든 쓸 수 있습니다.
+  `monitor_enabled = "false"`면 띄우지 않습니다(현황 파일이 오래되어 스팟 자리가 0이 됩니다).
 - agent를 재시작하는 동안에는 감시가 멈춥니다. 멈춰 둔 스팟 목록은 `parked.json`으로 이어 받습니다(2.10).
 - 감시기를 띄우지 못하면 ERROR를 남기고, 현황 파일이 없으니 스팟 자리는 0입니다.
 

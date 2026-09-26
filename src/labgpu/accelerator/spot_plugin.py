@@ -20,6 +20,7 @@ none of them and only exposes one pool device per model.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 import time
 from collections.abc import Collection, Mapping, Sequence
@@ -52,10 +53,9 @@ from ai.backend.common.types import (
 from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import MEMORY_SHARED_CACHE
-from ..paths import default_hook_path
+from ..paths import agent_state_dir, default_hook_path
 from ..selection import GpuSelector, validate_key
 from ..sizes import MiB
-from ..spot.config import DEFAULT_CONFIG_PATH
 from ..spot.config import Config as SpotConfigFile
 from .plugin import (
     DEVICE_CAPABILITIES,
@@ -90,7 +90,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     display_unit: str | None = None
     selector: GpuSelector = GpuSelector()
     enabled: bool = True
-    spot_status_path: Path = spotstatus.DEFAULT_STATUS_PATH
+    spot_status_path: Path = Path("./var/lib/backend.ai/labgpu") / spotstatus.STATUS_FILE
     spot_status_max_age: float = spotstatus.DEFAULT_MAX_AGE
 
     _nvml: NvmlReader | FakeNvmlReader | None = None
@@ -118,7 +118,10 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         self.selector = GpuSelector.from_config(dict(cfg))
         self.display_name = cfg.get("display_name")
         self.display_unit = cfg.get("display_unit")
-        self.spot_status_path = Path(cfg.get("spot_status_path", spotstatus.DEFAULT_STATUS_PATH))
+        state_dir = agent_state_dir(self.local_config)
+        self.spot_status_path = (
+            Path(cfg["spot_status_path"]) if cfg.get("spot_status_path") else state_dir / spotstatus.STATUS_FILE
+        )
         self.spot_status_max_age = float(cfg.get("spot_status_max_age", spotstatus.DEFAULT_MAX_AGE))
         self.hook_path = Path(cfg["hook_path"]) if cfg.get("hook_path") else default_hook_path()
         self._handed_out = {}
@@ -140,8 +143,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             )
             self.enabled = False
             return
-        if str(cfg.get("monitor", "true")).lower() not in ("0", "false", "no"):
-            self._start_monitor(Path(cfg.get("monitor_config", DEFAULT_CONFIG_PATH)))
+        if str(cfg.get("monitor_enabled", "true")).lower() not in ("0", "false", "no"):
+            self._start_monitor(cfg.get("monitor") or {}, state_dir)
         log.info(
             "[%s] labgpu %s spot: key=%s gpus=%s",
             self.entry_name,
@@ -150,13 +153,18 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             [g.uuid for g in self._gpus or []],
         )
 
-    def _start_monitor(self, config_path: Path) -> None:
-        """Run the spot monitor in this agent unless another spot plugin already does (SPEC 2.13)."""
+    def _start_monitor(self, sections: Mapping[str, Any], state_dir: Path) -> None:
+        """
+        Run the spot monitor in this agent unless another spot plugin already does (SPEC 2.13).
+        Its settings are this plugin's etcd `monitor/<section>/<key>`; state goes to `state_dir`.
+        """
         from ..spot.daemon import BackgroundMonitor, Controller
         from ..spot.docker import DockerCli
 
         def make() -> Controller:
-            cfg = SpotConfigFile.load(config_path if config_path.exists() else None)
+            cfg = SpotConfigFile.from_dict({k: dict(v) for k, v in sections.items()})
+            if "state_dir" not in sections.get("controller", {}):
+                cfg = replace(cfg, controller=replace(cfg.controller, state_dir=state_dir))
             return Controller(cfg, open_reader(), DockerCli())
 
         try:

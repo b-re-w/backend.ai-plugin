@@ -40,6 +40,7 @@ T
   put config/plugins/accelerator/gpu_spot_1/key pro6000-spot
   put config/plugins/accelerator/gpu_spot_1/model_pattern "*PRO 6000*"
   put config/plugins/accelerator/gpu_spot_1/spot_status_path $SP/state/status.json
+  put config/plugins/accelerator/gpu_spot_1/monitor_enabled false   # this E2E runs the monitor itself, with the fake cuda-checkpoint
   for n in 1 2 3 4; do put config/plugins/accelerator/gpu_slot_$n/spot_status_path $SP/state/status.json; done
   put config/resource_slots/pro6000-spot.device count
   $PY $D/slot_types.py $W/bai/fixtures/manager/example-resource-slot-types.json \

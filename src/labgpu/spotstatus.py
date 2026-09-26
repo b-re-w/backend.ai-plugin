@@ -11,9 +11,7 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import STATE_DIR
-
-DEFAULT_STATUS_PATH = STATE_DIR / "status.json"
+STATUS_FILE = "status.json"  # inside the monitor state dir (SPEC 2.9.1)
 DEFAULT_MAX_AGE = 60.0
 
 

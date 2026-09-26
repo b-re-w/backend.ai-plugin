@@ -291,3 +291,26 @@ def test_pick_spot_gpu_takes_the_roomiest_free_lendable_gpu():
     assert pick_spot_gpu(["A", "B"], status, taken={"B"}) == ("A", 10)
     assert pick_spot_gpu(["C", "D"], status) is None
     assert pick_spot_gpu(["A"], None) is None
+
+
+def test_state_dir_follows_the_agent_var_base_path():
+    from types import SimpleNamespace
+
+    from labgpu.paths import agent_state_dir
+
+    assert agent_state_dir({"agent": {"var-base-path": "/srv/bai/var"}}) == Path("/srv/bai/var/labgpu")
+    obj = SimpleNamespace(agent=SimpleNamespace(var_base_path=Path("/x")))
+    assert agent_state_dir(obj) == Path("/x/labgpu")
+    assert agent_state_dir(None) == Path("./var/lib/backend.ai/labgpu")
+
+
+def test_monitor_config_from_etcd_strings():
+    cfg = Config.from_dict({
+        "idle": {"idle_minutes": "10", "ignored_processes": "Xorg, gnome-shell"},
+        "spot": {"enabled": "false", "park_seconds": "120", "cuda_checkpoint": "/opt/cc"},
+        "reclaim": {"mem_reserve_mib": "4096"},
+    })
+    assert cfg.idle.idle_seconds == 600
+    assert cfg.idle.ignored_processes == ("Xorg", "gnome-shell")
+    assert cfg.spot.enabled is False and cfg.spot.park_seconds == 120.0
+    assert cfg.spot.cuda_checkpoint == Path("/opt/cc") and cfg.reclaim.mem_reserve_mib == 4096

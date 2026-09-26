@@ -1,4 +1,8 @@
-"""Spot controller configuration (SPEC 2.2)."""
+"""
+Spot monitor configuration (SPEC 2.2). In the agent it comes from the spot plugin's etcd config
+(`config/plugins/accelerator/gpu_spot_N/monitor/<section>/<key>`, all values strings); the
+`labgpu-spot` CLI can also read the same sections from a TOML file.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +11,18 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Self
 
-from ..paths import CONFIG_PATH, STATE_DIR, default_cuda_checkpoint
+from ..paths import default_cuda_checkpoint
 from ..sizes import MiB
 
-DEFAULT_CONFIG_PATH = CONFIG_PATH
+# The agent's own default var-base-path plus our subdirectory; the plugins always pass the real
+# `<var-base-path>/labgpu` of the agent they run in (SPEC 2.13).
+DEFAULT_STATE_DIR = Path("./var/lib/backend.ai/labgpu")
 
 
 @dataclass(frozen=True)
 class ControllerConfig:
     poll_interval: float = 5.0
-    state_dir: Path = STATE_DIR
+    state_dir: Path = DEFAULT_STATE_DIR
 
 
 @dataclass(frozen=True)
@@ -67,9 +73,7 @@ class Config:
 
     @classmethod
     def load(cls, path: Path | None) -> Self:
-        if path is None or not path.exists():
-            if path is not None and path != DEFAULT_CONFIG_PATH:
-                raise FileNotFoundError(path)
+        if path is None:
             return cls()
         with path.open("rb") as f:
             return cls.from_dict(tomllib.load(f))
@@ -79,26 +83,33 @@ class Config:
         unknown = set(raw) - {"controller", "idle", "reclaim", "spot"}
         if unknown:
             raise ValueError(f"unknown config sections: {sorted(unknown)}")
-        c = {k: Path(v) if k == "state_dir" else v for k, v in raw.get("controller", {}).items()}
         return cls(
-            controller=_build(ControllerConfig, c),
-            idle=_build(IdleConfig, _tuple_field(raw.get("idle", {}), "ignored_processes")),
+            controller=_build(ControllerConfig, raw.get("controller", {})),
+            idle=_build(IdleConfig, raw.get("idle", {})),
             reclaim=_build(ReclaimConfig, raw.get("reclaim", {})),
-            spot=_build(SpotConfig, {
-                k: Path(v) if k == "cuda_checkpoint" else v for k, v in raw.get("spot", {}).items()
-            }),
+            spot=_build(SpotConfig, raw.get("spot", {})),
         )
 
 
-def _tuple_field(values: dict[str, Any], key: str) -> dict[str, Any]:
-    if key in values:
-        return {**values, key: tuple(str(v) for v in values[key])}
-    return values
+def _coerce(kind: str, value: Any) -> Any:
+    """etcd hands every value over as a string; TOML already has the right types."""
+    if kind == "bool":
+        return value if isinstance(value, bool) else str(value).strip().lower() in ("1", "true", "yes")
+    if kind == "int":
+        return int(value)
+    if kind == "float":
+        return float(value)
+    if kind == "Path":
+        return Path(value)
+    if kind.startswith("tuple"):
+        items = value.split(",") if isinstance(value, str) else value
+        return tuple(str(v).strip() for v in items if str(v).strip())
+    return str(value)
 
 
 def _build[T](dc: type[T], values: dict[str, Any]) -> T:
-    names = {f.name for f in fields(dc)}  # type: ignore[arg-type]
-    unknown = set(values) - names
+    types = {f.name: str(f.type) for f in fields(dc)}  # type: ignore[arg-type]
+    unknown = set(values) - set(types)
     if unknown:
         raise ValueError(f"unknown keys for {dc.__name__}: {sorted(unknown)}")
-    return dc(**values)
+    return dc(**{k: _coerce(types[k], v) for k, v in values.items()})

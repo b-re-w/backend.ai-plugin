@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG_PATH, Config
+from .config import Config
 
 
 def cmd_daemon(cfg: Config, args: argparse.Namespace) -> int:
@@ -56,13 +56,20 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="labgpu-spot", description="GPU idleness monitor and spot session mover")
-    parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("-c", "--config", type=Path, default=None, help="TOML with the SPEC 2.2 sections")
+    parser.add_argument(
+        "--state-dir", type=Path, default=None, help="the agent's <var-base-path>/labgpu (SPEC 2.13)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("daemon", help="run the monitor")
     p.add_argument("-v", "--verbose", action="store_true")
     sub.add_parser("status", help="show per-GPU idleness")
     args = parser.parse_args(argv)
     cfg = Config.load(args.config)
+    if args.state_dir is not None:
+        from dataclasses import replace
+
+        cfg = replace(cfg, controller=replace(cfg.controller, state_dir=args.state_dir))
     match args.command:
         case "daemon":
             return cmd_daemon(cfg, args)

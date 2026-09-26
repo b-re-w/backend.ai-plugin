@@ -7,16 +7,11 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 # src/labgpu/paths.py -> the checkout root (the package is installed editable from it).
 REPO_DIR = Path(__file__).resolve().parents[2]
 VENV_DIR = REPO_DIR / ".venv"
-
-
-# Monitor state (status.json, parked.json) and its optional config, writable without root:
-# the agent may run as an ordinary user (SPEC 2.13).
-STATE_DIR = VENV_DIR / "labgpu"
-CONFIG_PATH = STATE_DIR / "spot.toml"
 
 
 def default_hook_path() -> Path:
@@ -31,3 +26,22 @@ def default_cuda_checkpoint() -> Path:
         return local
     found = shutil.which("cuda-checkpoint")
     return Path(found) if found else local
+
+
+def agent_state_dir(local_config: Any) -> Path:
+    """
+    `<var-base-path>/labgpu` of the agent the plugin runs in (SPEC 2.13): Backend.AI keeps an
+    agent's runtime state under its `[agent] var-base-path`, which the operator makes writable.
+    """
+    base: Any = None
+    for getter in (
+        lambda c: c["agent"]["var-base-path"],
+        lambda c: c.agent.var_base_path,
+        lambda c: c.agent_common.var_base_path,
+    ):
+        try:
+            base = getter(local_config)
+            break
+        except (KeyError, AttributeError, TypeError):
+            continue
+    return Path(base or "./var/lib/backend.ai") / "labgpu"

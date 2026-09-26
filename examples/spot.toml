@@ -1,8 +1,9 @@
-# <plugin checkout>/.venv/labgpu/spot.toml (optional; see docs/SPEC.md section 2.2)
+# Spot monitor settings (docs/SPEC.md 2.2). In production put them in etcd under
+# config/plugins/accelerator/gpu_spot_N/monitor/<section>/<key>; this TOML is for `labgpu-spot -c`.
 
 [controller]
 poll_interval = 5
-# state_dir = "<plugin checkout>/.venv/labgpu"   # status.json, parked.json
+# state_dir = "<agent var-base-path>/labgpu"   # status.json, parked.json (default)
 
 [idle]
 idle_minutes = 30
