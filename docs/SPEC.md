@@ -150,7 +150,7 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
   막지 않으면 모든 GPU를 가져가려다 점유 충돌로 한쪽이 init에 실패합니다(어느 쪽일지는 로딩 순서에 달림).
 - 장치의 `device_name`은 플러그인 key입니다. agent의 affinity map이 이 이름으로 장치를 찾기 때문에,
   빠지면 할당 단계에서 "No suitable devices found"로 세션 생성이 실패합니다(E2E에서 발견).
-- 운영자가 할 일 (예시 스크립트: `scripts/register_slots.sh`):
+- 운영자가 할 일 (연구실 구성 등록 스크립트: `scripts/register_slots.sh`):
   1. etcd `config/resource_slots`에 새 슬롯을 등록합니다(예: `cuda-pro6000.shares` → `count`). 매니저는 등록된
      슬롯만 WebUI에 넘깁니다.
      **26.x는 DB `resource_slot_types` 표에도 반드시 등록해야 합니다.** `agent_resources.slot_name`이 이 표를
@@ -516,7 +516,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 연구실 서버(26.8.3)에서 위 항목 전부 | 일부 확인(아래 Primary 로딩, 감시기 기동, 스팟 자리 수). 스팟 세션 시험은 UNVERIFIED |
 | 연구실 Primary 플러그인 로딩: `allow-compute-plugins = ["labgpu.accelerator"]`로 순정 `cuda` 대신 `gpu_slot_1~4`, `gpu_spot_1~4`가 올라옴. 체크아웃 `.venv/lib/libvgpu.so`(HAMi-core `ec5d85a`, CUDA 12.8.1-devel 빌드)를 기본 경로로 찾아 `mode=fractional enforced=True`. 보고 슬롯 `cuda-pro6000.shares` 2, `cuda-pro5000-72.shares` 1, `cuda-a6000.shares` 1, 없는 종류 `cuda-pro5000.shares` 0 | 확인 (2026-09-26, Primary, `8402dee`, agent 로그와 매니저 `agents.available_slots`) |
 | 감시기 agent 내장 기동(`8402dee`): agent가 `dolab` 계정이라 `/var/lib/labgpu`를 만들지 못해 감시기 스레드가 죽음(agent와 주인 슬롯은 정상, 스팟 자리 0). `b7b43c2`(상태를 agent `var-base-path` 아래로)와 `a9b3e6c`(`docker exec`)로 고침 | 실패 확인 (2026-09-26, Primary). 수정본은 아래 행에서 확인 |
-| 새 슬롯이 DB `resource_slot_types`에 없으면 매니저 heartbeat가 `ForeignKeyViolationError`(`fk_agent_resources_slot_name_resource_slot_types`)로 계속 실패하고 `agent_resources`에 새 슬롯이 안 생김. WSL E2E는 `05_labgpu.sh`가 fixture로 넣어서 안 드러났음. `scripts/register_slots.sh`에 fixture 단계 추가 | 실패 확인 (2026-09-26, Primary). 수정본 UNVERIFIED |
+| 새 슬롯이 DB `resource_slot_types`에 없으면 매니저 heartbeat가 `ForeignKeyViolationError`(`fk_agent_resources_slot_name_resource_slot_types`)로 계속 실패하고 `agent_resources`에 새 슬롯이 안 생김. WSL E2E는 `05_labgpu.sh`가 fixture로 넣어서 안 드러났음. 등록 스크립트에 fixture 단계 추가 | 실패 확인 후 수정 확인 (2026-09-26, Primary, `b05f828`): `resource_slot_types` 8행 생성, 12:00 이후 heartbeat 오류 없음, agent 재시작 없이 `agent_resources`에 새 슬롯 8개 |
 | 감시기 agent 내장 기동(`a9b3e6c`, agent는 `dolab` 계정): 오류 없이 뜨고 agent 종료 때 `spot monitor stopped`. 상태 파일 `<var-base-path>/labgpu/status.json`이 `dolab` 소유로 5초마다 갱신. 비점유 GPU 4장이 60초 뒤 LENDABLE(`lendable_memory` PRO 5000 72GB 70765MiB, PRO 6000 각 95184MiB, A6000 46476MiB). 스팟 자리 `cuda-pro6000-spot.device` 2, `cuda-pro5000-72-spot.device` 1, `cuda-a6000-spot.device` 1, 없는 종류 0. 주인 슬롯 그대로. 테스트 69개 통과 | 확인 (2026-09-26 11:41, Primary) |
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
 | 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
