@@ -82,7 +82,9 @@ cd /path/to/backend.ai-plugin && scripts/install_hami_core.sh && scripts/install
 ## 3-1. GPU 종류별 슬롯 (한 서버에 여러 종류의 GPU)
 
 Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로 운영합니다.
-[examples/per-model-slots.sh](examples/per-model-slots.sh)가 연구실 구성 그대로의 설정입니다.
+[examples/per-model-slots.sh](examples/per-model-slots.sh)가 연구실 구성 그대로의 설정입니다. 매니저 호스트에서
+실행하면 etcd 설정과 함께 DB의 슬롯 종류 표(`resource_slot_types`)까지 넣습니다. 26.x는 이 표에 없는 슬롯을
+받아 주지 않으니(agent heartbeat 실패) 이 단계를 빼먹지 마세요.
 
 1. etcd에 종류별 플러그인 설정과 슬롯을 등록합니다 (설정은 클러스터 공용, 서버마다 따로 둘 필요 없음).
 2. **모든 GPU 노드의** `agent.toml`:
