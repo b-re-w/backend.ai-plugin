@@ -1,5 +1,6 @@
 #!/bin/sh
-# Per-model GPU slots for the lab cluster (SPEC 1.11). Run once on the manager host.
+# Register the lab cluster's labgpu slots (SPEC 1.11, 2.12): etcd plugin config, config/resource_slots,
+# and the manager DB table resource_slot_types. Run on the manager host; safe to run again.
 #
 #   Primary:   PRO 5000 72GB (0), PRO 6000 x2 (1, 2), A6000 (3)
 #   Secondary: PRO 5000 48GB x4 (0-3)
@@ -72,6 +73,6 @@ old_ifs=$IFS; IFS="$(printf '
 _')"; IFS=${IFS%_}; set -f
 set -- $SLOT_TYPES
 set +f; IFS=$old_ifs
-"$PY" "$HERE/../scripts/slot_types_fixture.py" "$@" > "$fixture"
+"$PY" "$HERE/slot_types_fixture.py" "$@" > "$fixture"
 $BAI mgr fixture populate "$fixture"
 rm -f "$fixture"

@@ -82,7 +82,7 @@ cd /path/to/backend.ai-plugin && scripts/install_hami_core.sh && scripts/install
 ## 3-1. GPU 종류별 슬롯 (한 서버에 여러 종류의 GPU)
 
 Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로 운영합니다.
-[examples/per-model-slots.sh](examples/per-model-slots.sh)가 연구실 구성 그대로의 설정입니다. 매니저 호스트에서
+[scripts/register_slots.sh](scripts/register_slots.sh)가 연구실 구성 그대로의 설정입니다. 매니저 호스트에서
 실행하면 etcd 설정과 함께 DB의 슬롯 종류 표(`resource_slot_types`)까지 넣습니다. 26.x는 이 표에 없는 슬롯을
 받아 주지 않으니(agent heartbeat 실패) 이 단계를 빼먹지 마세요.
 
@@ -108,7 +108,7 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 스팟은 WebUI 세션 런처에서 고르는 실행 모드입니다. 스팟 세션도 보통 Backend.AI 세션이라 세션 목록과
 사용량 통계에 그대로 보입니다. 동작 규칙은 [SPEC 2.12](docs/SPEC.md)를 보세요.
 
-**매니저에서 한 번:** [examples/per-model-slots.sh](examples/per-model-slots.sh)가 종류별 슬롯과 함께
+**매니저에서 한 번:** [scripts/register_slots.sh](scripts/register_slots.sh)가 종류별 슬롯과 함께
 스팟 플러그인(`gpu_spot_1~4`, key `cuda-pro6000-spot` 등)과 슬롯(`cuda-pro6000-spot.device`)을 등록합니다.
 agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`로 시작하므로 이미지는 고치지 않아도 됩니다.
 
