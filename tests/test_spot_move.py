@@ -178,13 +178,13 @@ class FakeCkpt:
     def available(self, driver):
         return None
 
-    def move(self, pids, src, dst, visible):
+    def move(self, cid, pids, src, dst, visible):
         self.calls.append(("move", tuple(pids), src, dst))
 
-    def park(self, pids):
+    def park(self, cid, pids):
         self.calls.append(("park", tuple(pids)))
 
-    def restore(self, pids, src, dst, visible):
+    def restore(self, cid, pids, src, dst, visible):
         self.calls.append(("restore", tuple(pids), src, dst))
 
 
@@ -314,3 +314,22 @@ def test_monitor_config_from_etcd_strings():
     assert cfg.idle.ignored_processes == ("Xorg", "gnome-shell")
     assert cfg.spot.enabled is False and cfg.spot.park_seconds == 120.0
     assert cfg.spot.cuda_checkpoint == Path("/opt/cc") and cfg.reclaim.mem_reserve_mib == 4096
+
+
+def test_cuda_checkpoint_runs_inside_the_container(tmp_path):
+    from labgpu.spot.ckpt import CONTAINER_CUDA_CHECKPOINT, CudaCheckpoint, container_pid
+
+    (tmp_path / "4242").mkdir()
+    (tmp_path / "4242" / "status").write_text("Name: python\nNSpid: 4242 17\n")
+    assert container_pid(4242, tmp_path) == 17
+    calls = []
+    ck = CudaCheckpoint(Path("/x"), run=lambda cid, *argv: calls.append((cid, argv)) or "",
+                        pid_in_container=lambda p: p - 4225)
+    ck.move("c1", [4242], "GPU-a", "GPU-b", ["GPU-a", "GPU-b"])
+    actions = [argv[argv.index("--action") + 1] for _, argv in calls]
+    assert actions == ["lock", "checkpoint", "restore", "unlock"]
+    cid, argv = calls[2]
+    assert cid == "c1" and CONTAINER_CUDA_CHECKPOINT in argv and argv[:5] == (
+        "env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
+    assert argv[argv.index("--pid") + 1] == "17"
+    assert argv[argv.index("--device-map") + 1] == "GPU-a=GPU-b,GPU-b=GPU-a"

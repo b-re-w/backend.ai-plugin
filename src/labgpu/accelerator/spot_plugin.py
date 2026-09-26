@@ -46,6 +46,7 @@ from ai.backend.common.types import (
     DeviceId,
     DeviceModelInfo,
     DeviceName,
+    MountTypes,
     SlotName,
     SlotTypes,
 )
@@ -53,7 +54,8 @@ from ai.backend.common.types import (
 from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import MEMORY_SHARED_CACHE
-from ..paths import agent_state_dir, default_hook_path
+from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
+from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT
 from ..selection import GpuSelector, validate_key
 from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
@@ -97,6 +99,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     _gpus: list[GpuInfo] | None = None
     _monitor: Any = None  # the BackgroundMonitor this instance started, if any
     hook_path: Path = default_hook_path()
+    cuda_checkpoint: Path = Path("cuda-checkpoint")
     _handed_out: dict[str, float] | None = None  # GPU uuid -> when a new session got it
 
     @property
@@ -145,6 +148,12 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             return
         if str(cfg.get("monitor_enabled", "true")).lower() not in ("0", "false", "no"):
             self._start_monitor(cfg.get("monitor") or {}, state_dir)
+        spot_section = (cfg.get("monitor") or {}).get("spot") or {}
+        self.cuda_checkpoint = (
+            Path(spot_section["cuda_checkpoint"])
+            if spot_section.get("cuda_checkpoint")
+            else default_cuda_checkpoint()
+        )
         log.info(
             "[%s] labgpu %s spot: key=%s gpus=%s",
             self.entry_name,
@@ -315,7 +324,14 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         return []
 
     async def generate_mounts(self, source_path: Path, device_alloc: Any) -> list[MountInfo]:
-        return []
+        """cuda-checkpoint, read-only, for the monitor to run inside the container (SPEC 2.13)."""
+        if not self.enabled or self._allocated(device_alloc) <= 0:
+            return []
+        tool = self.cuda_checkpoint
+        if not tool.is_file():
+            log.warning("[%s] %s not found: this spot session cannot be moved", self.entry_name, tool)
+            return []
+        return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT))]
 
     # ---- metadata ----
 

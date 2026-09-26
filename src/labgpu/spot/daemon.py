@@ -247,34 +247,34 @@ class Controller:
             case Move(_, src, dst, reason):
                 pids = self._pids_on(cid, src)
                 log.info("spot %s: move %s -> %s (%s) pids=%s", cid[:12], src, dst, reason, pids)
-                job = lambda: ck.move(pids, src, dst, visible)  # noqa: E731
-                fallback = self._evict_job(pids, reason)
+                job = lambda: ck.move(cid, pids, src, dst, visible)  # noqa: E731
+                fallback = self._evict_job(cid, pids, reason)
             case Park(_, src, reason):
                 pids = self._pids_on(cid, src)
                 record = ParkedRecord(ParkedSpot(cid, src, visible, now), pids, self._mem_on(cid, src))
                 log.info("spot %s: park off %s (%s) pids=%s", cid[:12], src, reason, pids)
-                job = lambda: ck.park(pids)  # noqa: E731
-                fallback = self._evict_job(pids, reason)
+                job = lambda: ck.park(cid, pids)  # noqa: E731
+                fallback = self._evict_job(cid, pids, reason)
                 self._submit(action, job, fallback, record)
                 return
             case Restore(_, src, dst):
                 record = self.parked[cid]
                 log.info("spot %s: restore parked %s -> %s", cid[:12], src, dst)
-                job = lambda: ck.restore(record.pids, src, dst, record.spot.allowed)  # noqa: E731
+                job = lambda: ck.restore(cid, record.pids, src, dst, record.spot.allowed)  # noqa: E731
                 fallback = None
             case Evict(_, gpu, reason):
                 log.warning("spot %s: evict (%s)", cid[:12], reason)
                 if cid in self.parked:
                     job = self._evict_parked_job(self.parked[cid], reason)
                 else:
-                    job = self._evict_job(self._pids_on(cid, gpu), reason)
+                    job = self._evict_job(cid, self._pids_on(cid, gpu), reason)
                 fallback = None
         self._submit(action, job, fallback, None)
 
-    def _evict_job(self, pids: tuple[int, ...], reason: str) -> Callable[[], None]:
+    def _evict_job(self, cid: str, pids: tuple[int, ...], reason: str) -> Callable[[], None]:
         spot = self.cfg.spot
         sig = signal.Signals[spot.evict_signal]
-        return lambda: evict(pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
+        return lambda: evict(cid, pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
 
     def _evict_parked_job(self, record: ParkedRecord, reason: str) -> Callable[[], None]:
         """Bring it back on a GPU with room so the program can react to the signal, else kill it."""
@@ -291,11 +291,12 @@ class Controller:
         def job() -> None:
             if rooms and ck is not None:
                 dst = max(rooms, key=lambda o: o.free_memory).uuid
-                ck.restore(record.pids, record.spot.src, dst, record.spot.allowed)
-                evict(record.pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
+                cid = record.spot.container_id
+                ck.restore(cid, record.pids, record.spot.src, dst, record.spot.allowed)
+                evict(cid, record.pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
             else:
                 log.warning("spot %s: no GPU has room to resume it; killing", record.spot.container_id[:12])
-                evict(record.pids, sig=signal.SIGKILL, grace=0, reason=reason)
+                evict(record.spot.container_id, record.pids, sig=signal.SIGKILL, grace=0, reason=reason)
 
         return job
 

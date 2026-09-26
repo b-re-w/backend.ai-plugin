@@ -427,6 +427,17 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   그것을 그대로 씁니다. 띄운 플러그인의 `cleanup`(agent 종료) 때 멈춥니다. 진행 중인 이동은 끝낸 뒤 멈춥니다.
 - agent가 root로 돌기 때문에 cuda-checkpoint, 다른 사용자 프로세스에 대한 시그널, `/proc` 읽기가 그대로 됩니다.
 - 설정은 그 스팟 플러그인의 etcd `monitor/…`(2.2)에서 읽습니다.
+- **agent는 root가 아닐 수 있습니다**(연구실은 `dolab` 계정 + Docker 그룹). 그래서 감시기는 agent처럼 모든 조작을
+  Docker 데몬을 거쳐 합니다. 다른 사용자의 호스트 프로세스를 직접 건드리지 않습니다.
+  - 스팟 플러그인이 `cuda-checkpoint`(기본 `<체크아웃>/.venv/bin/cuda-checkpoint`, `monitor/spot/cuda_checkpoint`로
+    변경)를 스팟 컨테이너의 `/opt/labgpu/cuda-checkpoint`에 **읽기 전용**으로 붙입니다(agent 마운트, 항상 읽기 전용).
+  - 옮기기·멈춰 두기·되살리기: `docker exec -u root <컨테이너> env -u LD_PRELOAD -u CUDA_VISIBLE_DEVICES
+    /opt/labgpu/cuda-checkpoint --action … --pid <컨테이너 안 PID>`. 컨테이너 안 PID는 호스트
+    `/proc/<pid>/status`의 `NSpid` 마지막 값입니다(누구나 읽을 수 있음). HAMi-core와 순서를 바꾼 GPU 목록은
+    사용자 프로그램용이라 뺍니다.
+  - 내보내기: `docker exec -u root <컨테이너> sh -c`로 `/tmp/labgpu-spot-evicted`를 쓰고 `kill -s INT`, 유예 뒤 `kill -s KILL`.
+  - 관찰(NVML, `/proc/<pid>/cgroup`, `docker inspect`)은 일반 계정으로 됩니다.
+  - 스팟 사용자도 그 도구를 실행할 수 있지만, 자기 컨테이너 안 프로세스에만 쓸 수 있습니다.
 - 상태 파일(`status.json`, `parked.json`)은 Backend.AI 관례대로 agent의 `[agent] var-base-path` 아래 `labgpu/`에
   둡니다. agent가 자기 상태를 두는 곳이라, agent를 어느 계정으로 돌리든 쓸 수 있습니다.
   `monitor_enabled = "false"`면 띄우지 않습니다(현황 파일이 오래되어 스팟 자리가 0이 됩니다).
@@ -506,6 +517,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 플러그인의 GPU 고르기·환경변수(`tests/test_plugin_integration.py`) | 테스트는 작성했으나 실제 Backend.AI 클래스로 아직 돌리지 않음 |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
 | 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
+| 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | UNVERIFIED (연구실 노드) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문

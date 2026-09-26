@@ -278,6 +278,13 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "81920m"
     assert env["CUDA_DEVICE_MEMORY_LIMIT_1"] == "1m"
     assert asyncio.run(spot.get_hooks("ubuntu22.04", "x86_64")) == [fake_primary]
+    # cuda-checkpoint goes into the container read-only for the monitor's `docker exec` (SPEC 2.13).
+    tool = tmp_path / "cuda-checkpoint"
+    tool.write_bytes(b"")
+    spot.cuda_checkpoint = tool
+    [mount] = asyncio.run(spot.generate_mounts(tmp_path, alloc))
+    assert (mount.src_path, str(mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")
+    assert asyncio.run(spot.generate_mounts(tmp_path, {})) == []
     meta = spot.get_metadata()
     assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"
     assert asyncio.run(spot.generate_docker_args(None, {})) == {}
