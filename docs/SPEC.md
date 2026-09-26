@@ -368,6 +368,10 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   `cuda-pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
   `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`,
   `monitor_enabled`(기본 `true`, 2.13), `monitor/<구역>/<키>`(감시기 설정, 2.2).
+- 표시 이름은 `display_name`, `display_unit`으로 정합니다(`scripts/register_slots.sh`는 주인 슬롯 이름 + " Spot",
+  예: "PRO 6000 Spot"). 설정이 없으면 **노드의 GPU와 상관없이 key에서** 만듭니다(`cuda-pro5000-72-spot` →
+  "PRO5000-72 Spot", 단위 `PRO5000-72-SPOT`). 매니저는 슬롯마다 표시 정보를 하나만 두고 어느 agent가 보고한
+  것이든 쓰므로, 그 GPU가 없는 노드도 같은 이름을 보고해야 합니다.
   설정하지 않은 `gpu_spot_N`은 건너뜁니다.
 - GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
 - 장치는 종류마다 가상 장치 하나(`spot`)입니다. agent는 할당 맵을 시작할 때 한 번만 만들기 때문에

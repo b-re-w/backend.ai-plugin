@@ -95,3 +95,12 @@ def claim_gpus(uuids: Iterable[str], owner: str, claim_dir: Path | None = None) 
             )
     for uuid in uuids:
         (directory / uuid).write_text(f"{pid}:{owner}")
+
+
+def key_label(key: str) -> str:
+    """
+    Node-independent display label from a plugin key (SPEC 1.2, 2.12): "cuda-pro5000-72-spot"
+    -> "PRO5000-72". Used when display_name/display_unit are not configured, so every agent
+    reports the same name even where it has no GPU of that model.
+    """
+    return key.removeprefix("cuda-").removesuffix("-spot").upper()

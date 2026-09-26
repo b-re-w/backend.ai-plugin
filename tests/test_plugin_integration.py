@@ -287,4 +287,5 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert asyncio.run(spot.generate_mounts(tmp_path, {})) == []
     meta = spot.get_metadata()
     assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"
+    assert meta["human_readable_name"] == "PRO6000 Spot"
     assert asyncio.run(spot.generate_docker_args(None, {})) == {}

@@ -56,7 +56,7 @@ from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
 from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT
-from ..selection import GpuSelector, validate_key
+from ..selection import GpuSelector, key_label, validate_key
 from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
 from .plugin import (
@@ -66,7 +66,6 @@ from .plugin import (
     PluginNotConfigured,
     _device_name_kwarg,
     get_resource_spec_from_container,
-    short_model_name,
 )
 
 log = logging.getLogger("ai.backend.labgpu.accelerator.spot")
@@ -342,12 +341,13 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         return {"labgpu_spot": "true" if self.enabled else "false"}
 
     def get_metadata(self) -> AcceleratorMetadata:
-        models = sorted({g.name for g in self._gpus or []})
-        base = short_model_name(models[0]) if len(models) == 1 else str(self.key).upper()
+        # Nothing here may depend on this node's GPUs: the manager keeps one metadata per slot,
+        # reported by whichever agent, so every node must say the same (SPEC 2.12).
+        base = key_label(str(self.key))
         return {
             "slot_name": str(self.slot),
             "human_readable_name": self.display_name or f"{base} Spot",
-            "description": f"Spot GPU (lent while the owner is idle): {', '.join(models) or 'none'}",
+            "description": "Spot GPU (lent while the owner is idle)",
             "display_unit": self.display_unit or f"{base}-SPOT",
             "number_format": {"binary": False, "round_length": 0},
             "display_icon": "gpu1",

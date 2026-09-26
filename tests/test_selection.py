@@ -4,7 +4,7 @@ import os
 import pytest
 
 from labgpu.nvml import FakeNvmlReader, NvmlError, open_reader
-from labgpu.selection import GpuClaimConflict, GpuSelector, claim_gpus, model_matches, validate_key
+from labgpu.selection import GpuClaimConflict, GpuSelector, claim_gpus, key_label, model_matches, validate_key
 from labgpu.sizes import GiB
 
 PRIMARY = {
@@ -76,3 +76,9 @@ def test_fake_reader(tmp_path, monkeypatch):
 def test_model_matches():
     assert model_matches("NVIDIA RTX A6000", ("*A6000*",))
     assert not model_matches("NVIDIA RTX A6000", ("*PRO 6000*",))
+
+
+def test_key_label_is_node_independent():
+    assert key_label("cuda-pro5000-72-spot") == "PRO5000-72"
+    assert key_label("cuda-pro5000-spot") == "PRO5000"
+    assert key_label("cuda-a6000") == "A6000"
