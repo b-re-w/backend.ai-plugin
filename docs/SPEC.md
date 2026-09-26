@@ -507,14 +507,16 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 호스트 `Xorg`가 모든 GPU에 떠 있어도 LENDABLE로 판정하고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg는 활동으로 보지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
 | WebUI 세션 세부 화면(사용자 포크 v26.8.1 기반): "포트" 줄과 "GPU 대여" 줄. 빌려준 세션은 "빌려주는 중, GPU 1/1, 경과 시간", 아닌 세션은 "빌려주지 않음" | 확인 (26.8.3, WSL, Prometheus 포함, 브라우저 자동 조작, 2026-09-25) |
 | 에이전트 재시작 뒤 매니저가 통계를 중복 합산해도 화면 값이 맞음(capacity 1 보정) | 단위 테스트로 확인 |
-| 연구실 서버(26.8.3으로 올리는 중)에서 위 항목 전부 | UNVERIFIED |
+| 연구실 서버(26.8.3)에서 위 항목 전부 | 일부 확인(아래 Primary 로딩). 나머지는 UNVERIFIED |
+| 연구실 Primary 플러그인 로딩: `allow-compute-plugins = ["labgpu.accelerator"]`로 순정 `cuda` 대신 `gpu_slot_1~4`, `gpu_spot_1~4`가 올라옴. 체크아웃 `.venv/lib/libvgpu.so`(HAMi-core `ec5d85a`, CUDA 12.8.1-devel 빌드)를 기본 경로로 찾아 `mode=fractional enforced=True`. 보고 슬롯 `cuda-pro6000.shares` 2, `cuda-pro5000-72.shares` 1, `cuda-a6000.shares` 1, 없는 종류 `cuda-pro5000.shares` 0 | 확인 (2026-09-26, Primary, `8402dee`, agent 로그와 매니저 `agents.available_slots`) |
+| 감시기 agent 내장 기동(`8402dee`): agent가 `dolab` 계정이라 `/var/lib/labgpu`를 만들지 못해 감시기 스레드가 죽음(agent와 주인 슬롯은 정상, 스팟 자리 0). `b7b43c2`(상태를 agent `var-base-path` 아래로)와 `a9b3e6c`(`docker exec`)로 고침 | 실패 확인 (2026-09-26, Primary). 수정본은 UNVERIFIED |
 | 스팟 회수 시 소유자 작업이 실패하지 않음 (S3) | UNVERIFIED (HAMi-core 강제가 전제) |
 | 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
 | 감시기: 같은 GPU에 겹친 스팟을 다른 GPU로 옮김, 주인 쪽 활동에 옮길 곳이 없으면 멈춰 둠, 원래 GPU가 비면 되살림, `park_seconds` 뒤 내보냄 | 확인 (같은 환경, 가짜 cuda-checkpoint `e2e/fake_cuda_checkpoint.py`) |
 | 순정 `cuda` 플러그인(`cuda.device`) + `gpu_spot_N` 조합 | UNVERIFIED |
 | 스팟 GPU 고르기와 메모리 제한: `CUDA_VISIBLE_DEVICES` 순서로 고른 GPU가 `cuda:0`이 됨, 나머지 GPU는 1MiB 제한으로 쓸 수 없음(컨텍스트 생성 포함), 컨테이너 안 `nvidia-smi`의 메모리 표시 | UNVERIFIED (연구실 노드) |
 | HAMi-core 제한을 건 채 cuda-checkpoint로 옮긴 뒤 제한이 새 GPU로 따라가는지, `CUDA_VISIBLE_DEVICES`를 순서만 바꿔 준 상태에서 이동이 되는지 | UNVERIFIED (연구실 노드) |
-| 스팟 플러그인의 GPU 고르기·환경변수(`tests/test_plugin_integration.py`) | 테스트는 작성했으나 실제 Backend.AI 클래스로 아직 돌리지 않음 |
+| 스팟 플러그인의 GPU 고르기·환경변수·마운트(`tests/test_plugin_integration.py`) | 확인 (Primary, Backend.AI 26.8.3 소스 + agent venv Python 3.13.7: `8402dee` 66개 2026-09-25, `a9b3e6c` 69개 2026-09-26, 건너뜀 없음. `PYTHONPATH=src:<backend.ai>/src <bai venv>/bin/python -m pytest -q`) |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
 | 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
 | 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | UNVERIFIED (연구실 노드) |
