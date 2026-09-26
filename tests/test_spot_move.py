@@ -333,3 +333,11 @@ def test_cuda_checkpoint_runs_inside_the_container(tmp_path):
         "env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
     assert argv[argv.index("--pid") + 1] == "17"
     assert argv[argv.index("--device-map") + 1] == "GPU-a=GPU-b,GPU-b=GPU-a"
+
+
+def test_cli_status_accepts_state_dir_after_the_command(tmp_path, capsys):
+    from labgpu.spot.cli import main
+
+    (tmp_path / "status.json").write_text(json.dumps({"updated_at": 0, "gpus": []}))
+    assert main(["status", "--state-dir", str(tmp_path)]) == 0
+    assert main(["--state-dir", str(tmp_path), "status"]) == 0

@@ -63,7 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("daemon", help="run the monitor")
     p.add_argument("-v", "--verbose", action="store_true")
-    sub.add_parser("status", help="show per-GPU idleness")
+    st = sub.add_parser("status", help="show per-GPU idleness")
+    # Also accepted after the command: `labgpu-spot status --state-dir DIR`.
+    for sp in (p, st):
+        sp.add_argument("--state-dir", type=Path, default=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     cfg = Config.load(args.config)
     if args.state_dir is not None:
