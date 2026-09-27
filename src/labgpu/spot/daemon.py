@@ -286,13 +286,17 @@ class Controller:
             self.checkpointer.gate(cid, a, d)
 
     def _gate_new(self, spots: list[SpotContainer]) -> None:
-        """A spot container can open only the GPU it was given, from the first time it is seen."""
+        """
+        A spot container can open only the GPU it was given, from the first time it is seen; a
+        parked one (no GPU at all) none of them, so nothing new starts on the owner's GPU.
+        """
         for s in spots:
-            gpu = self.assigned.get(s.id)
-            if not gpu or self.gated.get(s.id) == gpu or s.id in self.busy:
+            gpu = "" if s.id in self.parked else self.assigned.get(s.id)
+            if gpu is None or self.gated.get(s.id) == gpu or s.id in self.busy:
                 continue
+            allow = [gpu] if gpu else []
             others = [u for u in s.uuids if u != gpu]
-            self._submit(Gate(s.id, gpu), lambda s=s, gpu=gpu, others=others: self._gate(s.id, [gpu], others), None, None)
+            self._submit(Gate(s.id, gpu), lambda s=s, allow=allow, others=others: self._gate(s.id, allow, others), None, None)
 
     def _lendable(self, uuid: str) -> int:
         v = self.last_verdicts.get(uuid)
@@ -333,7 +337,12 @@ class Controller:
 
                 def job() -> None:
                     self._gate(cid, allow=[dst])
-                    ck.restore(cid, record.pids, src, dst, record.spot.allowed)
+                    try:
+                        ck.restore(cid, record.pids, src, dst, record.spot.allowed)
+                    except CheckpointError:
+                        if dst != self.assigned.get(cid):
+                            self._gate(cid, deny=[dst])  # never leave a failed target open
+                        raise
                     if src != dst:
                         self._gate(cid, deny=[src])
                     ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
@@ -429,6 +438,9 @@ class Controller:
         for action, ok, record in done:
             cid = action.container_id
             self.busy.pop(cid, None)
+            if isinstance(action, Hold):
+                # It got past the device permissions (e.g. sudo chmod): close them again.
+                self.gated.pop(cid, None)
             if isinstance(action, Hold) and ok and record is not None:
                 old = self.held.get(cid)
                 self.held[cid] = (

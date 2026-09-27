@@ -571,3 +571,33 @@ def test_device_files_are_gated_and_follow_moves(tmp_path):
     assert ck.calls[2] == ("gate", (), (0,)) and ck.calls[3][0] == "place"
     c.tick(95)
     assert c.gated[SPOT] == f"GPU-{dst}" and not any(x[0] == "gate" for x in ck.calls[4:])
+
+
+def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_path):
+    from labgpu.spot.ckpt import CheckpointError
+
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs, handler=False)
+    c.minors = {"GPU-0": 0, "GPU-1": 1, "GPU-2": 2}
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)  # parked
+    procs[0].pop()
+    ck.calls.clear()
+    c.tick(85)
+    assert ("gate", (), (0, 1, 2)) in ck.calls  # parked: every device closed
+
+    def broken_restore(cid, pids, src, dst, visible):
+        ck.calls.append(("restore-failed", dst))
+        raise CheckpointError("rc=1: restore failed")
+
+    ck.restore = broken_restore
+    procs[2] = []  # GPU-2 frees up
+    ck.calls.clear()
+    for t in (90, 160):
+        c.tick(t)
+    assert ("gate", (2,), ()) in ck.calls and ("restore-failed", "GPU-2") in ck.calls
+    assert ck.calls[ck.calls.index(("restore-failed", "GPU-2")) + 1] == ("gate", (), (2,))  # closed again

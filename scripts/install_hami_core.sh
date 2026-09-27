@@ -41,7 +41,7 @@ docker run --rm -v "$out":/out -v "$here":/labgpu:ro -e REF="$HAMI_REF" -e OWNER
   git clone -q https://github.com/Project-HAMi/HAMi-core.git /src && cd /src
   git checkout -q "$REF"
   git apply /labgpu/hami-core-labgpu.patch
-  make >/tmp/build.log 2>&1 || { grep -iE "error" /tmp/build.log | head -20; exit 1; }
+  make >/tmp/build.log 2>&1 || { grep -iE -B2 -A4 "error" /tmp/build.log | head -60; exit 1; }
   cp build/libvgpu.so /out/ && git log -1 --format=%H > /out/COMMIT
   chown -R "$OWNER" /out'
 

@@ -8,10 +8,10 @@ index 29326b3..d4248ee 100644
  int need_cuda_virtualize();
 +int labgpu_map_visible_uuids(int in_nvml_init);
 diff --git a/src/nvml/hook.c b/src/nvml/hook.c
-index 26519fb..3231ef1 100644
+index 26519fb..8fe2262 100644
 --- a/src/nvml/hook.c
 +++ b/src/nvml/hook.c
-@@ -312,8 +312,55 @@ void nvml_preInit() {
+@@ -312,8 +312,57 @@ void nvml_preInit() {
      }   
  }
  
@@ -23,15 +23,17 @@ index 26519fb..3231ef1 100644
 + *
 + * Only the real NVML entry points are called: this runs inside nvml_postInit (under the
 + * pthread_once of the hooked nvmlInit), and calling a hooked NVML function there deadlocks.
-+ * From the CUDA side (in_nvml_init == 0) NVML is initialised first through the hooked nvmlInit,
++ * From the CUDA side (in_nvml_init == 0) NVML is initialised first through the hooked nvmlInit_v2,
 + * which loads the real entry points and runs nvml_postInit (and so this mapping) once.
 + */
++nvmlReturn_t nvmlInit_v2(void);  /* defined below (hooked); nvml-subset.h declares no functions */
++
 +int labgpu_map_visible_uuids(int in_nvml_init) {
 +    char *env = getenv("CUDA_VISIBLE_DEVICES");
 +    if (env == NULL || strncmp(env, "GPU-", 4) != 0) {
 +        return -1;
 +    }
-+    if (!in_nvml_init && nvmlInit() != NVML_SUCCESS) {
++    if (!in_nvml_init && nvmlInit_v2() != NVML_SUCCESS) {
 +        return -1;
 +    }
 +    char buf[4096];
@@ -67,7 +69,7 @@ index 26519fb..3231ef1 100644
  }
  
  nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
-@@ -338,6 +385,20 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
+@@ -338,6 +387,20 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
      CHECK_NVML_API(nvmlDeviceGetIndex(device, &dev_id));
      int cudadev = nvml_to_cuda_map(dev_id);
      if (cudadev < 0) {

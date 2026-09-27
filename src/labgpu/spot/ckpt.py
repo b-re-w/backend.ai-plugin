@@ -111,7 +111,9 @@ class DockerExec:
         except (OSError, subprocess.TimeoutExpired) as e:
             raise CheckpointError(f"{' '.join(argv[:4])}: {e}") from e
         if proc.returncode != 0:
-            raise CheckpointError(f"{' '.join(argv[:6])} failed: {(proc.stderr or proc.stdout).strip()}")
+            # Both streams: HAMi-core writes its banner to stderr, cuda-checkpoint its error to stdout.
+            out = " | ".join(x.strip() for x in (proc.stdout, proc.stderr) if x.strip())
+            raise CheckpointError(f"{' '.join(argv[:6])} failed (rc={proc.returncode}): {out}")
         return proc.stdout
 
 
