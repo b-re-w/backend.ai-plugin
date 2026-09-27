@@ -328,7 +328,14 @@ class Controller:
                 pids = self._pids_on(cid, src)
                 record = ParkedRecord(ParkedSpot(cid, src, visible, now), pids, self._mem_on(cid, src))
                 log.info("spot %s: park off %s (%s) pids=%s", cid[:12], src, reason, pids)
-                self._submit(action, lambda: ck.park(cid, pids), None, record)
+
+                def park_job() -> None:
+                    ck.park(cid, pids)
+                    # Nothing of it is on a GPU now: close every device in the same step, so no
+                    # new program can open the GPU just handed back to its owner (SPEC 2.12).
+                    self._gate(cid, deny=list(visible))
+
+                self._submit(action, park_job, None, record)
                 return
             case Restore(_, src, dst):
                 record = self.parked[cid]
@@ -452,6 +459,8 @@ class Controller:
                 self.gated[cid] = action.dst
             elif isinstance(action, Gate) and ok:
                 self.gated[cid] = action.gpu
+            if isinstance(action, Park) and ok:
+                self.gated[cid] = ""  # every device closed
             if isinstance(action, (Park, Oom)) and ok and record is not None:
                 old = self.parked.get(cid)
                 # A session may be parked in parts (processes without the handler first).

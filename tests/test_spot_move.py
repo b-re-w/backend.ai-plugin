@@ -584,11 +584,13 @@ def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_
         c.tick(t)
     procs[0].append((20, 30 * GiB, 90, SPOT))
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
-    c.tick(80)  # parked
+    ck.calls.clear()
+    c.tick(80)  # parked, and in the same step every device closed
+    assert ck.calls == [("park", (20,)), ("gate", (), (0, 1, 2))]
     procs[0].pop()
     ck.calls.clear()
     c.tick(85)
-    assert ("gate", (), (0, 1, 2)) in ck.calls  # parked: every device closed
+    assert not any(x[0] == "gate" for x in ck.calls)  # nothing reopened
 
     def broken_restore(cid, pids, src, dst, visible):
         ck.calls.append(("restore-failed", dst))
