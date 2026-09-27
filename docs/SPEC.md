@@ -440,10 +440,12 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
      CUDA가 시작되기 전에 이 값을 가져가 지금 GPU 하나만 봅니다.
    - 이미 떠 있던 셸이나 이 파일을 거치지 않는 프로그램은 처음 GPU를 봅니다. 그런 프로그램이 원래 GPU를 쓰면
      감시기는 스팟이 GPU 두 장에 걸친 것으로 보고 규칙 8(OOM 오류)을 적용합니다.
-   - **알려진 한계: 컨테이너 안 `nvidia-smi` 표시.** `nvidia-smi`는 `CUDA_VISIBLE_DEVICES`를 따르지 않고 붙은 GPU를
-     모두 PCI 순서로 나열하며, HAMi-core는 제한과 사용량을 그 순서의 index에 붙여 보여 줍니다(2026-09-27 Primary 실측).
-     그래서 지금 GPU가 PCI 순서의 첫째가 아니면(처음부터 뒤쪽 GPU를 받았거나 옮긴 뒤) 제한과 사용량이 엉뚱한 GPU에
-     표시됩니다. 실제 제한(프로그램이 쓸 수 있는 양)은 맞습니다. HAMi-core를 고치지 않고는 표시를 맞출 방법이 없습니다.
+   - **컨테이너 안 `nvidia-smi` 표시와 host pid.** 원본 HAMi-core는 `CUDA_VISIBLE_DEVICES` 항목을 숫자로만 읽어,
+     우리가 넣는 GPU UUID는 모두 0번이 됩니다. `nvidia-smi` 같은 NVML 전용 프로그램은 이 매핑을 아예 쓰지 않습니다.
+     그래서 지금 GPU가 PCI 순서의 첫째가 아니면 제한과 사용량이 엉뚱한 GPU에 표시되고, 옮긴 뒤 새 프로세스마다
+     `host pid is error`가 났습니다(2026-09-27 Primary 실측). `scripts/hami-core-labgpu.patch`(사용자 결정)가 이를 고칩니다:
+     UUID를 NVML index로 매핑하고, NVML 전용 프로그램에도 같은 매핑을 적용하며, 스팟 컨테이너(`LABGPU_SPOT=1`)에서
+     받지 않은 GPU는 메모리를 1MiB로 보여 줍니다. `scripts/install_hami_core.sh`가 빌드 전에 적용합니다.
 7. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기거나 멈춰 둘 수 없으므로
    4의 OOM 오류만 냅니다(`oom_grace_seconds`마다 다시). 처리기가 없거나 오류를 잡고 계속 돌면 주인 GPU를 함께
    쓰게 되므로, cuda-checkpoint가 동작하는 노드에서만 스팟을 켜는 것이 맞습니다. 이동이 실패하면 OOM 오류를 냅니다.
@@ -583,6 +585,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 이동 뒤 문제(`903285a`): 새로 띄운 프로세스와 `nvidia-smi`가 처음 GPU 순서를 봐서, 주인에게 돌아간 원래 GPU가 `cuda:0`이면서 빌려줄 수 있는 메모리(약 95GB)만큼 열려 있었음. HAMi-core `Limit inconsistency` ERROR. 규칙 6과 GPU 하나만 보이게 한 변경으로 고침 | 수정 확인 (2026-09-27 19:06~19:12, Primary, `8a88d1f`): 새 세션 `device_count()=1`, `cuda:0`=고른 GPU. 이동(빈틈 3.25초) 뒤 새 `bash -lc`, `bash -c`, 셸 없는 `docker exec` python 모두 옮겨 간 GPU 하나만 봄. `Limit inconsistency` 사라짐. 통합 테스트 80개 통과 |
 | 처리기가 있는 프로세스와 없는 프로세스가 섞이면 세션 전체를 오류 없이 멈춰 두던 것(`903285a`, 사용자 방침과 다름)을 프로세스마다로 고침 | 수정 확인 (2026-09-27, Primary, `8a88d1f`): `python -S` 쪽 즉시 멈춤, 처리기 쪽은 OOM을 받고 정확히 60초 뒤 멈춤, 주인이 비우자 6초 뒤 둘이 함께 되살아남. 이때 OOM이 멈춰 두기 뒤에 가서 약 2.5초 늦었고, 신호를 먼저 보내도록 순서를 바꿈(UNVERIFIED) |
 | 보안: 스팟 세션 안에서 `CUDA_VISIBLE_DEVICES`를 바꾸면(`B,A` 또는 `B`) 빌리지 않은 GPU B에 10GB 할당 성공, 감시기도 반응 없음(`8a88d1f`, B에 스팟이 있는 것을 허용하던 규칙). 규칙 10으로 고침 | 문제 확인 (2026-09-27 19:25, Primary). 수정본 UNVERIFIED |
+| HAMi-core 패치(`hami-core-labgpu.patch`): 빌드 성공, 스팟 세션 안 `nvidia-smi`에서 받은 GPU에만 제한이 표시되고 나머지는 1MiB, 옮긴 뒤에도 맞게 표시, `host pid is error` 사라짐, 메모리 제한은 그대로 | UNVERIFIED (연구실 노드. 이 개발 PC에는 CUDA 빌드 환경이 없어 컴파일도 확인하지 못함) |
 | 장치 파일 권한(`chmod 000`)으로 받지 않은 GPU 막기, 옮길 때 대상만 잠깐 열기, root `docker exec`로 `chmod`가 HAMi-core 오류 없이 되는지, `sudo`로 되돌린 뒤 `held`로 잡히는지 | UNVERIFIED (연구실 노드) |
 | 감시기가 옮긴 뒤 새로 띄운 CUDA 프로세스마다 HAMi-core `host pid is error!`, `SET_TASK_PID FAILED - using container PID for accounting`. 이동 전에는 없음. `nvidia-smi` 표시처럼 HAMi-core가 CUDA index와 NVML(PCI) index를 같다고 보는 탓으로 추정. 사용량 기록이 컨테이너 PID 기준이 되어 제한 정확도에 영향이 있는지는 미확인 | 확인 (2026-09-27, Primary). 원인·영향 UNVERIFIED |
 | root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |

@@ -8,6 +8,12 @@
 #
 # Builds inside a CUDA devel container, so the node needs Docker (no root, no local CUDA toolkit).
 # HAMi-core after 6b92be9 needs CUDA >= 12.5 headers; keep CUDA_IMAGE and HAMI_REF in step.
+#
+# scripts/hami-core-labgpu.patch is applied before building (SPEC 1.8): HAMi-core reads
+# CUDA_VISIBLE_DEVICES entries as numbers, so the GPU UUIDs the spot plugin sets all became index 0
+# (limits and nvidia-smi on the wrong GPU, "host pid is error"). The patch maps UUIDs to NVML
+# indices, applies that mapping in NVML-only programs such as nvidia-smi, and shows GPUs a spot
+# session was not given as 1 MiB.
 # Without the library the plugins log an ERROR and fall back to whole-GPU (`<key>.device`) slots.
 set -euo pipefail
 
@@ -28,14 +34,16 @@ mkdir -p "$prefix"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-docker run --rm -v "$out":/out -e REF="$HAMI_REF" -e OWNER="$(id -u):$(id -g)" "$CUDA_IMAGE" bash -c '
+here=$(cd "$(dirname "$0")" && pwd)
+docker run --rm -v "$out":/out -v "$here":/labgpu:ro -e REF="$HAMI_REF" -e OWNER="$(id -u):$(id -g)" "$CUDA_IMAGE" bash -c '
   set -e
   apt-get update -qq && apt-get install -y -qq git cmake >/dev/null 2>&1
   git clone -q https://github.com/Project-HAMi/HAMi-core.git /src && cd /src
   git checkout -q "$REF"
+  git apply /labgpu/hami-core-labgpu.patch
   make >/tmp/build.log 2>&1 || { grep -iE "error" /tmp/build.log | head -20; exit 1; }
   cp build/libvgpu.so /out/ && git log -1 --format=%H > /out/COMMIT
   chown -R "$OWNER" /out'
 
 install -m 0644 "$out/libvgpu.so" "$prefix/libvgpu.so"
-echo "installed $prefix/libvgpu.so (HAMi-core $(cut -c1-12 "$out/COMMIT"), built with $CUDA_IMAGE)"
+echo "installed $prefix/libvgpu.so (HAMi-core $(cut -c1-12 "$out/COMMIT") + labgpu patch, built with $CUDA_IMAGE)"

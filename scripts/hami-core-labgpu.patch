@@ -1,0 +1,101 @@
+diff --git a/src/include/utils.h b/src/include/utils.h
+index 29326b3..c3ed635 100644
+--- a/src/include/utils.h
++++ b/src/include/utils.h
+@@ -20,3 +20,4 @@ void sort(int vmap[16]);
+ int initial_virtual_devices();
+ int parser(char *str);
+ int need_cuda_virtualize();
++int labgpu_map_visible_uuids();
+diff --git a/src/nvml/hook.c b/src/nvml/hook.c
+index 26519fb..760a130 100644
+--- a/src/nvml/hook.c
++++ b/src/nvml/hook.c
+@@ -314,6 +314,8 @@ void nvml_preInit() {
+ 
+ void nvml_postInit() {
+     init_device_info();
++    /* labgpu: NVML-only programs (nvidia-smi) never run the CUDA-side mapping. */
++    labgpu_map_visible_uuids();
+ }
+ 
+ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
+@@ -338,6 +340,20 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
+     CHECK_NVML_API(nvmlDeviceGetIndex(device, &dev_id));
+     int cudadev = nvml_to_cuda_map(dev_id);
+     if (cudadev < 0) {
++        /* labgpu: a spot session may use only its own GPU; show every other one as 1 MiB, free. */
++        char *spot = getenv("LABGPU_SPOT");
++        if (spot != NULL && strcmp(spot, "1") == 0) {
++            size_t blocked = 1 << 20;
++            if (version == 1) {
++                ((nvmlMemory_t*)memory)->total = blocked;
++                ((nvmlMemory_t*)memory)->free = blocked;
++                ((nvmlMemory_t*)memory)->used = 0;
++            } else {
++                ((nvmlMemory_v2_t*)memory)->total = blocked;
++                ((nvmlMemory_v2_t*)memory)->free = blocked;
++                ((nvmlMemory_v2_t*)memory)->used = 0;
++            }
++        }
+         return NVML_SUCCESS;
+     }
+     size_t usage = get_current_device_memory_usage(cuda_to_nvml_map(cudadev));
+diff --git a/src/utils.c b/src/utils.c
+index 98e2f28..d6d885a 100755
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -138,9 +138,52 @@ nvmlReturn_t set_task_pid() {
+     return NVML_SUCCESS; 
+ }
+ 
++/*
++ * labgpu: CUDA_VISIBLE_DEVICES may list GPU UUIDs ("GPU-..."), which atoi() reads as 0. Map each
++ * UUID to its NVML index so limits, nvidia-smi and host pid detection use the right physical GPU;
++ * CUDA indices beyond the list map to nothing (-1). Returns the count, or -1 if not all UUIDs.
++ */
++int labgpu_map_visible_uuids() {
++    char *env = getenv("CUDA_VISIBLE_DEVICES");
++    if (env == NULL || strncmp(env, "GPU-", 4) != 0) {
++        return -1;
++    }
++    char buf[4096];
++    strncpy(buf, env, sizeof(buf) - 1);
++    buf[sizeof(buf) - 1] = '\0';
++    if (nvmlInit() != NVML_SUCCESS) {
++        return -1;
++    }
++    int mapped[CUDA_DEVICE_MAX_COUNT];
++    int count = 0;
++    char *save = NULL;
++    for (char *tok = strtok_r(buf, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
++        nvmlDevice_t device;
++        unsigned int index;
++        if (count >= CUDA_DEVICE_MAX_COUNT || strncmp(tok, "GPU-", 4) != 0
++            || nvmlDeviceGetHandleByUUID(tok, &device) != NVML_SUCCESS
++            || nvmlDeviceGetIndex(device, &index) != NVML_SUCCESS) {
++            LOG_WARN("labgpu: cannot map CUDA_VISIBLE_DEVICES entry %s", tok);
++            return -1;
++        }
++        mapped[count++] = (int)index;
++    }
++    for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
++        cuda_to_nvml_map_array[i] = (i < count) ? mapped[i] : -1;
++    }
++    for (int i = 0; i < count; i++) {
++        LOG_INFO("labgpu: device %d -> nvml %d", i, cuda_to_nvml_map_array[i]);
++    }
++    return count;
++}
++
+ int parse_cuda_visible_env() {
+     char *s = getenv("CUDA_VISIBLE_DEVICES");
+-    int count = 0;
++    int count = labgpu_map_visible_uuids();
++    if (count >= 0) {
++        return count;
++    }
++    count = 0;
+     for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
+         cuda_to_nvml_map_array[i] = i;
+     }
