@@ -727,3 +727,29 @@ def test_short_session_gets_its_full_limit_once_it_fits():
     assert plan(verdicts, running, [], now=20, can_checkpoint=True, oom_grace=10) == [Resize("z", "A")]
     running = [RunningSpot("z", frozenset({"A"}), ("A",), 5, share=1.0)]
     assert plan(verdicts, running, [], now=20, can_checkpoint=True, oom_grace=10) == []
+
+
+def test_idle_spot_holds_its_share_but_never_pushes_a_running_one():
+    verdicts = {
+        "A": v("A", GpuState.LENT, must=True, reasons=("owner back",)),
+        "B": v("B", GpuState.LENDABLE),
+        "C": v("C", GpuState.LENDABLE),
+    }
+    running = [RunningSpot("s", frozenset({"A"}), ("A", "B", "C"), 0, share=0.75)]
+    # B is the fuller fit, but an idle 0.5 spot was given it: the move goes to C.
+    [mv] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10, idle={"B": 0.5})
+    assert (mv.container_id, mv.dst) == ("s", "C")
+    # An idle spot over the top of a running one on a quiet GPU moves nobody.
+    verdicts["A"] = v("A", GpuState.LENT)
+    assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10, idle={"A": 0.5}) == []
+
+
+def test_status_counts_a_spot_with_no_gpu_process_on_its_gpu(tmp_path):
+    OWNER = "o" * 64
+    c, fake, ck = make_controller(tmp_path, {0: [(10, 4 * GiB, 0, OWNER)]})
+    c.tick(0)
+    c.write_status(tmp_path / "status.json", 0)
+    gpus = {g["uuid"]: g for g in json.loads((tmp_path / "status.json").read_text())["gpus"]}
+    assert gpus["GPU-0"]["spots"] == [{"container": "s" * 12, "share": 1.0, "idle": True}]
+    assert gpus["GPU-0"]["spot_share"] == 1.0 and gpus["GPU-1"]["spot_share"] == 0
+    assert parse_status((tmp_path / "status.json").read_text(), 0)["GPU-0"].spot_share == 1.0

@@ -15,6 +15,8 @@ Rules:
   - any other program is parked at once (checkpointed off the GPU, no error).
   A parked session is restored when a GPU of its model frees up.
 - Parked sessions get free GPUs before running sessions that must move.
+- A spot session with no GPU process yet still holds its share on the GPU it was given, within
+  the room the running sessions leave (user decision), so no one else is placed there.
 - Consolidation only when a session must move and its share fits nowhere (user decision): smaller
   spots on one GPU are moved elsewhere so that GPU has room; the waiting session moves next tick.
   Spread-out spots are otherwise left alone, since every move pauses a program for seconds.
@@ -108,10 +110,12 @@ def plan(
     oom_grace: float,
     oomed: Mapping[str, float] | None = None,
     busy: frozenset[str] = frozenset(),
+    idle: Mapping[str, float] | None = None,
 ) -> list[Action]:
     """
     `oomed`: when each container last got the out-of-memory error; `busy`: containers with an
-    operation in flight, left alone this tick.
+    operation in flight, left alone this tick; `idle`: share held on each GPU by spot sessions
+    with no GPU process yet.
     """
     oomed = oomed or {}
     actions: list[Action] = []
@@ -128,6 +132,9 @@ def plan(
                 over.add(s.container_id)
             else:
                 used[g] = used.get(g, 0.0) + s.share
+    # Idle sessions come after running ones: they never push a running session off its GPU.
+    for g, share in (idle or {}).items():
+        used[g] = used.get(g, 0.0) + max(min(share, 1.0 - used.get(g, 0.0)), 0.0)
 
     def room(u: str) -> float:
         return 1.0 - used.get(u, 0.0)

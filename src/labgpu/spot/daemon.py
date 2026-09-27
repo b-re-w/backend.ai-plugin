@@ -246,6 +246,19 @@ class Controller:
             for cid, gs in gpus_of.items()
         ]
 
+    def _idle(self) -> dict[str, list[str]]:
+        """Spot sessions with no GPU process yet, by the GPU they were given (SPEC 2.12 rule 1-1)."""
+        on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
+        out: dict[str, list[str]] = {}
+        for cid in sorted(self.spot_info):
+            gpu = self.assigned.get(cid)
+            if gpu and cid not in on_gpu and cid not in self.parked and cid not in self.held:
+                out.setdefault(gpu, []).append(cid)
+        return out
+
+    def _idle_shares(self) -> dict[str, float]:
+        return {g: sum(self._share(c) for c in cs) for g, cs in self._idle().items()}
+
     def _short(self, cid: str, gpu: str) -> bool:
         """Its limit is clearly below share x capacity (fragmented placement), so raise it when possible."""
         applied = self.caps.get(cid) or (self.spot_info[cid].cap if cid in self.spot_info else 0)
@@ -292,6 +305,7 @@ class Controller:
             oom_grace=self.cfg.spot.oom_grace_seconds,
             oomed=self.oomed,
             busy=frozenset(self.busy),
+            idle=self._idle_shares(),
         )
         for action in actions:
             self._dispatch(action, now)
@@ -535,6 +549,7 @@ class Controller:
     def write_status(self, path: Path, now: float) -> None:
         """Per-GPU state for `labgpu-spot status` and the plugins (SPEC 2.9.1)."""
         gpus = []
+        idle = self._idle()
         for v in self.last_verdicts.values():
             o = self.last_obs.get(v.uuid)
             spots = sorted(o.spot_containers) if o else []
@@ -544,8 +559,9 @@ class Controller:
                 "state": str(v.state),
                 "lent_job": spots[0][:12] if spots else None,
                 "lent_since": since,
-                "spots": [{"container": c[:12], "share": self._share(c)} for c in spots],
-                "spot_share": round(sum(self._share(c) for c in spots), 4),
+                "spots": [{"container": c[:12], "share": self._share(c)} for c in spots]
+                + [{"container": c[:12], "share": self._share(c), "idle": True} for c in idle.get(v.uuid, [])],
+                "spot_share": round(min(sum(self._share(c) for c in [*spots, *idle.get(v.uuid, [])]), 1.0), 4),
             })
         status = {
             "updated_at": now,
