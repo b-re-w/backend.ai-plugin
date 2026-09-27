@@ -530,7 +530,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 호스트 `Xorg`가 모든 GPU에 떠 있어도 LENDABLE로 판정하고, Xorg 메모리는 빌려줄 양에서 빠지며, Xorg는 활동으로 보지 않음. 컨테이너 안의 같은 이름 프로세스와 목록에 없는 호스트 프로세스는 여전히 회수 사유 | 확인 (26.8.3, 가짜 NVML, 2026-09-25) |
 | WebUI 세션 세부 화면(사용자 포크 v26.8.1 기반): "포트" 줄과 "GPU 대여" 줄. 빌려준 세션은 "빌려주는 중, GPU 1/1, 경과 시간", 아닌 세션은 "빌려주지 않음" | 확인 (26.8.3, WSL, Prometheus 포함, 브라우저 자동 조작, 2026-09-25) |
 | 에이전트 재시작 뒤 매니저가 통계를 중복 합산해도 화면 값이 맞음(capacity 1 보정) | 단위 테스트로 확인 |
-| 연구실 서버(26.8.3)에서 위 항목 전부 | 일부 확인(아래 Primary 로딩, 감시기 기동, 스팟 자리 수). 스팟 세션 시험은 UNVERIFIED |
+| 연구실 서버(26.8.3)에서 위 항목 전부 | 대부분 확인. 남은 것은 이 표의 다른 UNVERIFIED 행 |
 | 연구실 Primary 플러그인 로딩: `allow-compute-plugins = ["labgpu.accelerator"]`로 순정 `cuda` 대신 `gpu_slot_1~4`, `gpu_spot_1~4`가 올라옴. 체크아웃 `.venv/lib/libvgpu.so`(HAMi-core `ec5d85a`, CUDA 12.8.1-devel 빌드)를 기본 경로로 찾아 `mode=fractional enforced=True`. 보고 슬롯 `cuda-pro6000.shares` 2, `cuda-pro5000-72.shares` 1, `cuda-a6000.shares` 1, 없는 종류 `cuda-pro5000.shares` 0 | 확인 (2026-09-26, Primary, `8402dee`, agent 로그와 매니저 `agents.available_slots`) |
 | 감시기 agent 내장 기동(`8402dee`): agent가 `dolab` 계정이라 `/var/lib/labgpu`를 만들지 못해 감시기 스레드가 죽음(agent와 주인 슬롯은 정상, 스팟 자리 0). `b7b43c2`(상태를 agent `var-base-path` 아래로)와 `a9b3e6c`(`docker exec`)로 고침 | 실패 확인 (2026-09-26, Primary). 수정본은 아래 행에서 확인 |
 | 새 슬롯이 DB `resource_slot_types`에 없으면 매니저 heartbeat가 `ForeignKeyViolationError`(`fk_agent_resources_slot_name_resource_slot_types`)로 계속 실패하고 `agent_resources`에 새 슬롯이 안 생김. WSL E2E는 `05_labgpu.sh`가 fixture로 넣어서 안 드러났음. 등록 스크립트에 fixture 단계 추가 | 실패 확인 후 수정 확인 (2026-09-26, Primary, `b05f828`): `resource_slot_types` 8행 생성, 12:00 이후 heartbeat 오류 없음, agent 재시작 없이 `agent_resources`에 새 슬롯 8개 |
@@ -539,15 +539,17 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 플러그인: 자리 수가 감시기 판정을 따라감(빌려줄 수 있는 PRO 6000 2장 → 2), 자리가 차면 다음 스팟 세션은 대기, 스팟 컨테이너에 `LABGPU_SPOT`·`LABGPU_SPOT_UUIDS`, 매니저 슬롯 목록에 `pro6000-spot.device`("PRO6000-SPOT") | 확인 (2026-09-25, WSL 26.8.3, 가짜 NVML, `e2e/27_spot.sh`, `28_spot_scenario.sh`) |
 | 감시기: 같은 GPU에 겹친 스팟을 다른 GPU로 옮김, 주인 쪽 활동에 옮길 곳이 없으면 멈춰 둠, 원래 GPU가 비면 되살림, `park_seconds` 뒤 내보냄 | 확인 (같은 환경, 가짜 cuda-checkpoint `e2e/fake_cuda_checkpoint.py`) |
 | 순정 `cuda` 플러그인(`cuda.device`) + `gpu_spot_N` 조합 | UNVERIFIED |
-| 스팟 GPU 고르기와 메모리 제한: `CUDA_VISIBLE_DEVICES` 순서로 고른 GPU가 `cuda:0`이 됨, 나머지 GPU는 1MiB 제한으로 쓸 수 없음(컨텍스트 생성 포함), 컨테이너 안 `nvidia-smi`의 메모리 표시 | UNVERIFIED (연구실 노드) |
-| HAMi-core 제한을 건 채 cuda-checkpoint로 옮긴 뒤 제한이 새 GPU로 따라가는지, `CUDA_VISIBLE_DEVICES`를 순서만 바꿔 준 상태에서 이동이 되는지 | UNVERIFIED (연구실 노드) |
+| 스팟 GPU 고르기와 메모리 제한: `CUDA_VISIBLE_DEVICES` 순서로 고른 GPU가 `cuda:0`이 됨, 나머지 GPU는 1MiB 제한으로 쓸 수 없음(컨텍스트 생성 포함), 컨테이너 안 `nvidia-smi`의 메모리 표시 | 확인 (2026-09-27, Primary PRO 6000 ×2 + Secondary PRO 5000 ×4, `903285a`): 고른 GPU가 `cuda:0`, `CUDA_DEVICE_MEMORY_LIMIT_0`=빌려줄 수 있는 메모리(Primary 95184m, Secondary 46338m), 나머지 `1m`, 마운트 두 개 읽기 전용 |
+| HAMi-core 제한을 건 채 cuda-checkpoint로 옮긴 뒤 제한이 새 GPU로 따라가는지, `CUDA_VISIBLE_DEVICES`를 순서만 바꿔 준 상태에서 이동이 되는지 | 확인 (2026-09-27, Primary PRO 6000 ×2 + Secondary PRO 5000 ×4, `903285a`): 이동 뒤 `cuda:0` 제한이 새 GPU의 빌려줄 수 있는 메모리로 다시 맞춰짐 |
 | 스팟 플러그인의 GPU 고르기·환경변수·마운트(`tests/test_plugin_integration.py`) | 확인 (Primary, Backend.AI 26.8.3 소스 + agent venv Python 3.13.7: `8402dee` 66개 2026-09-25, `a9b3e6c` 69개 2026-09-26, 건너뜀 없음. `PYTHONPATH=src:<backend.ai>/src <bai venv>/bin/python -m pytest -q`) |
-| 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
-| 즉시 OOM: `sitecustomize` 처리기 + 실시간 신호로 `torch.OutOfMemoryError`(0.46초), HAMi-core 제한을 실행 중 1MiB로 낮추면 다음 할당도 OOM, SIGUSR1은 HAMi-core가 가져가 안 됨, `uv run`에서도 동작 | 방법 확인 (2026-09-27, Primary, 손으로 실행). 플러그인에 넣은 뒤의 전체 흐름은 UNVERIFIED |
-| 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | root로 실행하면 실패: 컨테이너 `/etc/ld.so.preload`로 올라온 HAMi-core가 `/tmp/labgpu-vgpu.cache`를 열지 못함(`errno=13`), 이동 실패 뒤 내보내기로 넘어감 (2026-09-27, Primary, `1398dbf`). 주인 계정으로 실행하도록 고친 뒤는 UNVERIFIED |
+| 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | 확인 (2026-09-27, Primary PRO 6000 ×2 + Secondary PRO 5000 ×4, `903285a`): 학습 중 이동, 최대 빈틈 Primary 3.19초·Secondary 3.88초, 오류 없이 이어짐. Secondary는 연쇄 이동 두 번도 성공 |
+| 즉시 OOM: `sitecustomize` 처리기 + 실시간 신호로 `torch.OutOfMemoryError`(0.46초), HAMi-core 제한을 실행 중 1MiB로 낮추면 다음 할당도 OOM, SIGUSR1은 HAMi-core가 가져가 안 됨, `uv run`에서도 동작 | 확인 (2026-09-27, Primary PRO 6000 ×2 + Secondary PRO 5000 ×4, `903285a`): 두 GPU 모두 막히면 신호 뒤 0.07초(Secondary 0.09초)에 `torch.OutOfMemoryError`, 메시지에 사유. 오류를 잡고 계속 쓰면 10.0초 뒤 멈춰 둠(GPU 사용 0, 프로세스 유지). 주인을 지우면 3초 뒤 되살아나 이어짐. 처리기 없는 프로세스(`python -S`)는 오류 없이 바로 멈춰 둠. `uv run`에서 동작 |
+| 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | root로는 실패(`1398dbf`, HAMi-core `errno=13`). 세션 사용자로 실행하도록 고친 뒤 확인 (2026-09-27, Primary PRO 6000 ×2 + Secondary PRO 5000 ×4, `903285a`) |
 | 스팟 세션(`cuda-pro6000-spot.device` 1): 환경변수(`LABGPU_SPOT_GPU`, 고른 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_0=95184m`, `_1=1m`), HAMi-core 로드, 컨테이너 안 `/opt/labgpu/cuda-checkpoint`. torch 2.11(cu128): `cuda:0`이 고른 PRO 6000, 8GB 할당 성공, `cuda:1`에 100MB는 `OutOfMemoryError`(총 1024KiB). 컨테이너 안 `nvidia-smi`는 95184MiB / 1MiB. 학습을 돌리면 그 GPU가 LENT | 확인 (2026-09-27, Primary, `1398dbf`) |
 | 주인 세션이 같은 GPU를 받으면 감시기가 5초 안에 이동 시작(`new owner containers`) | 감지 확인 (2026-09-27, Primary). 이동 자체는 위 행의 권한 문제로 실패 |
 | 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt` | 확인 (2026-09-27, Primary, `1398dbf`). 이때는 유예 뒤 SIGKILL도 했으나, 사용자 결정으로 강제 종료를 없앰(규칙 5). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt`가 나지 않음. 강제 종료 없는 새 방식은 UNVERIFIED |
+| 알려진 부작용(동작에는 영향 없음): 이동 뒤 컨테이너에서 새로 띄운 프로세스가 HAMi-core `Limit inconsistency detected for 0th device` ERROR를 냄(처음 환경변수 제한과 공유 영역 값이 달라서). 이동 뒤에도 새 프로세스의 `nvidia-smi`는 처음 GPU 순서로 보임(옮겨 간 프로그램은 새 GPU를 씀). root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |
+| 한 컨테이너에 처리기가 있는 프로세스와 없는 프로세스가 섞여 있으면 컨테이너 전체를 오류 없이 바로 멈춰 둠(주인 GPU를 붙잡는 프로세스가 남지 않게 하려는 의도) | 확인 (2026-09-27, Primary) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문

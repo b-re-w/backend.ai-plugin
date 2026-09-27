@@ -142,6 +142,9 @@ agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 
   - 컨테이너에는 스팟용 `PYTHONPATH=/opt/labgpu/python`이 들어 있습니다. `PYTHONPATH`를 따로 쓸 때는
     `PYTHONPATH=/opt/labgpu/python:내경로`처럼 뒤에 붙여 주세요.
 - 세션은 남아 있고, 다시 실행하면 빈 GPU에서 돕니다.
+- 옮겨진 뒤 세션 안에서 `nvidia-smi`를 새로 치면 처음 받은 GPU 기준으로 보이고, HAMi-core가
+  `Limit inconsistency` 오류 줄을 찍을 수 있습니다. 실제로 도는 프로그램은 옮겨 간 GPU를 제한대로 쓰고 있으니 무시해도 됩니다.
+- 한 세션에서 여러 프로그램을 돌릴 때 하나라도 오류 처리기가 없으면(`python -S` 등) 오류 없이 세션 전체가 멈춰 둬집니다.
 
 ## 5. 소유자가 알아 둘 것
 
