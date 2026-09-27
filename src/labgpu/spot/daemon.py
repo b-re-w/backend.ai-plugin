@@ -28,7 +28,7 @@ from .docker import DockerError, OwnerContainer, SpotContainer
 from .hostinfo import CpuSampler
 from .model import GpuObservation, GpuVerdict, ProcKind
 from .observer import observe
-from .placement import Action, Hold, Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
+from .placement import Action, Hold, Move, Oom, Park, ParkedSpot, Resize, Restore, RunningSpot, plan
 
 log = logging.getLogger("ai.backend.labgpu.spot")
 
@@ -102,6 +102,7 @@ class Controller:
         self.held: dict[str, ParkedRecord] = {}  # processes caught on GPUs they were not given
         self.gated: dict[str, str] = {}  # container -> the GPU its device files are opened for
         self.minors: dict[str, int | None] = {}  # GPU uuid -> /dev/nvidia<minor>
+        self.caps: dict[str, int] = {}  # container -> memory limit last applied by the monitor, bytes
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
@@ -161,6 +162,8 @@ class Controller:
             del self.held[cid]
         for cid in [c for c in self.gated if c not in self.spot_info]:
             del self.gated[cid]
+        for cid in [c for c in self.caps if c not in self.spot_info]:
+            del self.caps[cid]
         observations = self._observe(now, owners, spots, docker_ok)
         self.last_obs = {o.uuid: o for o in observations}
         busy_gpus = self._busy_gpus()
@@ -238,9 +241,16 @@ class Controller:
                 oom_ready=any(self.handler_check(pid) for pid in self._pids_on(cid, None)),
                 assigned=self.assigned.get(cid),
                 share=self._share(cid),
+                short=len(gs) == 1 and self._short(cid, next(iter(gs))),
             )
             for cid, gs in gpus_of.items()
         ]
+
+    def _short(self, cid: str, gpu: str) -> bool:
+        """Its limit is clearly below share x capacity (fragmented placement), so raise it when possible."""
+        applied = self.caps.get(cid) or (self.spot_info[cid].cap if cid in self.spot_info else 0)
+        full = self._cap(cid, gpu)
+        return bool(applied) and applied < full * 0.95
 
     def _share(self, cid: str) -> float:
         info = self.spot_info.get(cid)
@@ -345,6 +355,7 @@ class Controller:
                         ck.move(cid, pids, src, dst, visible)
                         end.state = dst
                     ck.place(cid, pids[0], self._order(visible, dst), size)
+                    self.caps[cid] = size
 
                 fallback = self._oom_job(cid, pids, self._order(visible, src), reason)
             case Park(_, src, reason):
@@ -375,6 +386,7 @@ class Controller:
                         ck.restore(cid, record.pids, src, dst, record.spot.allowed)
                         end.state = dst
                     ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
+                    self.caps[cid] = size
 
                 fallback = None
             case Hold(_, gpus, reason):
@@ -393,6 +405,16 @@ class Controller:
 
                 self._submit(action, hold_job, None, record)
                 return
+            case Resize(_, gpu):
+                pids = self._pids_on(cid, gpu)
+                size = self._cap(cid, gpu)
+                log.info("spot %s: memory limit raised to its share on %s (%d MiB)", cid[:12], gpu, size >> 20)
+
+                def job() -> None:
+                    ck.place(cid, pids[0], self._order(visible, gpu), size)
+                    self.caps[cid] = size
+
+                fallback = None
             case Oom(_, gpu, reason):
                 # Per process (SPEC 2.12): one that installed the handler gets the error; one that
                 # did not is parked right away so it does not keep the owner's GPU.

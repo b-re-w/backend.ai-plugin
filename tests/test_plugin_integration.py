@@ -276,6 +276,7 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert env["LABGPU_SPOT_GPU"] == "GPU-p6000-2"
     assert env["CUDA_VISIBLE_DEVICES"] == "GPU-p6000-2"  # only the chosen GPU
     assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "40960m"
+    assert env["LABGPU_SPOT_CAP"] == "40960"  # what the monitor compares with share x capacity
     assert env["CUDA_DEVICE_MEMORY_LIMIT_1"] == "1m"
     assert asyncio.run(spot.get_hooks("ubuntu22.04", "x86_64")) == [fake_primary]
     # cuda-checkpoint goes into the container read-only for the monitor's `docker exec` (SPEC 2.13).

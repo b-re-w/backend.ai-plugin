@@ -15,6 +15,9 @@ Rules:
   - any other program is parked at once (checkpointed off the GPU, no error).
   A parked session is restored when a GPU of its model frees up.
 - Parked sessions get free GPUs before running sessions that must move.
+- Consolidation only when a session must move and its share fits nowhere (user decision): smaller
+  spots on one GPU are moved elsewhere so that GPU has room; the waiting session moves next tick.
+  Spread-out spots are otherwise left alone, since every move pauses a program for seconds.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ class RunningSpot:
     oom_ready: bool = True  # at least one process has the out-of-memory signal handler installed
     assigned: str | None = None  # the GPU this session was given (None: not known)
     share: float = 1.0  # its share of one GPU
+    short: bool = False  # its memory limit is below its share (placed on a fragmented GPU)
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,15 @@ class Hold:
     reason: str
 
 
-Action = Move | Park | Restore | Oom | Hold
+@dataclass(frozen=True)
+class Resize:
+    """Raise a session's memory limit to its full share once its GPU has room (SPEC 2.12 rule 3-1)."""
+
+    container_id: str
+    gpu: str
+
+
+Action = Move | Park | Restore | Oom | Hold | Resize
 
 
 def plan(
@@ -139,6 +151,55 @@ def plan(
         used[best.uuid] = used.get(best.uuid, 0.0) + share  # promised this tick
         return best.uuid
 
+    def hosts(u: str) -> bool:
+        v = verdicts.get(u)
+        return v is not None and (v.state is GpuState.LENDABLE or (v.state is GpuState.LENT and not v.must_reclaim))
+
+    on_gpu: dict[str, list[RunningSpot]] = {}
+    for r in running:
+        if len(r.gpus) == 1 and r.container_id not in over:
+            on_gpu.setdefault(next(iter(r.gpus)), []).append(r)
+    moving: set[str] = set()  # sessions given a move this tick to make room for another
+
+    def make_room(s: RunningSpot, src: str) -> list[Move]:
+        """Moves that free one GPU enough for `s` (fewest moves wins), or [] if none can."""
+        model = verdicts[src].model if src in verdicts else None
+        best: tuple[str, list[Move], dict[str, float]] | None = None
+        for u in s.allowed:
+            # src itself counts when it may still host spots: a session that arrived over the top
+            # of a fragmented GPU can stay once the smaller ones leave it.
+            if not hosts(u) or (model is not None and verdicts[u].model != model):
+                continue
+            sim = dict(used)
+            moves: list[Move] = []
+            for h in sorted(on_gpu.get(u, []), key=lambda h: h.share):
+                if 1.0 - sim.get(u, 0.0) + eps >= s.share:
+                    break
+                if h.container_id in busy or h.container_id in moving or h.container_id == s.container_id:
+                    continue
+                dests = [
+                    w for w in h.allowed
+                    if w not in (u, src) and hosts(w) and verdicts[w].model == verdicts[u].model
+                    and 1.0 - sim.get(w, 0.0) + eps >= h.share
+                ]
+                if not dests:
+                    continue
+                w = min(dests, key=lambda w: (1.0 - sim.get(w, 0.0) - h.share,
+                                              -(verdicts[w].spot_capacity or verdicts[w].lendable_memory)))
+                sim[w] = sim.get(w, 0.0) + h.share
+                sim[u] = sim.get(u, 0.0) - h.share
+                moves.append(Move(h.container_id, u, w, f"making room for {s.container_id[:12]}"))
+            if moves and 1.0 - sim.get(u, 0.0) + eps >= s.share and (best is None or len(moves) < len(best[1])):
+                best = (u, moves, sim)
+        if best is None:
+            return []
+        u, moves, sim = best
+        used.clear()
+        used.update(sim)
+        used[u] = used.get(u, 0.0) + s.share  # held for the waiting session
+        moving.update(m.container_id for m in moves)
+        return moves
+
     running_ids = {s.container_id for s in running}
     for p in sorted(parked, key=lambda p: p.since):
         if p.container_id in busy or p.container_id in running_ids:
@@ -148,7 +209,7 @@ def plan(
             actions.append(Restore(p.container_id, p.src, dst))
 
     for s in sorted(running, key=lambda s: s.since):
-        if s.container_id in busy:
+        if s.container_id in busy or s.container_id in moving:
             continue
         # The spot side is not trusted (SPEC 2.12): a process on any GPU but the one the session
         # was given, e.g. after changing CUDA_VISIBLE_DEVICES, leaves that GPU right away.
@@ -165,6 +226,8 @@ def plan(
         elif v is None:
             reason = "GPU not observed"
         elif v.state is GpuState.LENT and not v.must_reclaim:
+            if s.short:
+                actions.append(Resize(s.container_id, src))
             continue
         else:
             reason = "; ".join(v.reasons) or f"GPU is {v.state}"
@@ -173,6 +236,10 @@ def plan(
         parkable = can_checkpoint and len(s.gpus) == 1
         if dst is not None:
             actions.append(Move(s.container_id, src, dst, reason))
+            continue
+        room_moves = make_room(s, src) if parkable else []
+        if room_moves:
+            actions.extend(room_moves)  # it moves next tick, into the room these make
         elif parkable and not s.oom_ready:
             actions.append(Park(s.container_id, src, reason))  # no process could see the error
         elif last is None:

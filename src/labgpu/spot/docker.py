@@ -36,6 +36,7 @@ class SpotContainer:
     uuids: tuple[str, ...]  # every GPU attached to it: where it may run or be moved to
     gpu: str = ""  # the GPU the spot plugin gave it (LABGPU_SPOT_GPU at creation)
     share: float = 1.0  # its share of one GPU (LABGPU_SPOT_SHARE, SPEC 2.12)
+    cap: int = 0  # memory limit the plugin gave it at creation, bytes (LABGPU_SPOT_CAP, MiB); 0 unknown
 
 
 def parse_share(value: str | None) -> float:
@@ -101,6 +102,7 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         uuids=tuple(u for u in env.get(ENV_SPOT_UUIDS, "").split(",") if u),
         gpu=env.get("LABGPU_SPOT_GPU", ""),
         share=parse_share(env.get("LABGPU_SPOT_SHARE")),
+        cap=int(env["LABGPU_SPOT_CAP"]) << 20 if env.get("LABGPU_SPOT_CAP", "").isdigit() else 0,
     )
 
 

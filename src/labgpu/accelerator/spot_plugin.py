@@ -305,6 +305,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             ENV_SPOT_UUIDS: ",".join(g.uuid for g in gpus),
             ENV_SPOT_GPU: chosen,
             ENV_SPOT_SHARE: f"{share:g}",
+            # Below share x capacity when placed on a fragmented GPU; the monitor raises it once there is room.
+            "LABGPU_SPOT_CAP": str(max(cap // MiB, 1)),
             "CUDA_VISIBLE_DEVICES": chosen,
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
             # SPEC 2.12: the out-of-memory error for a session that cannot be moved.

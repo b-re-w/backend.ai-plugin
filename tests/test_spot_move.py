@@ -9,7 +9,7 @@ from labgpu.spot.daemon import Controller
 from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
-from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
+from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Resize, Restore, RunningSpot, plan
 from labgpu.spotstatus import parse_status, pick_spot_gpu, roomiest_spot_gpu, spot_capacity
 
 P6K = "NVIDIA RTX PRO 6000"
@@ -657,3 +657,73 @@ def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_
     i = ck.calls.index(("restore-failed", "GPU-2"))
     assert ck.calls[i - 1] == ("gate", (0, 1, 2), ())  # all open for cuda-checkpoint
     assert ck.calls[i + 1] == ("gate", (), (0, 1, 2))  # still parked: all closed again
+
+
+# ---- consolidation (SPEC 2.12 rule 3-1) ----
+
+def test_big_share_on_a_fragmented_gpu_makes_room_instead_of_oom():
+    # A and B each hold a 0.5 spot; a whole-GPU spot z landed on A (fragmented placement).
+    verdicts = {"A": v("A", GpuState.LENT), "B": v("B", GpuState.LENT)}
+    running = [
+        RunningSpot("x", frozenset({"A"}), ("A", "B"), 0, share=0.5),
+        RunningSpot("y", frozenset({"B"}), ("A", "B"), 1, share=0.5),
+        RunningSpot("z", frozenset({"A"}), ("A", "B"), 5, share=1.0),
+    ]
+    actions = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    # x leaves A for B's free half; z waits on A (no error) and fits there once x is gone.
+    assert actions == [Move("x", "A", "B", "making room for z")]
+    after = [
+        RunningSpot("x", frozenset({"B"}), ("A", "B"), 11, share=0.5),
+        RunningSpot("y", frozenset({"B"}), ("A", "B"), 1, share=0.5),
+        RunningSpot("z", frozenset({"A"}), ("A", "B"), 5, share=1.0),
+    ]
+    assert plan(verdicts, after, [], now=20, can_checkpoint=True, oom_grace=10) == []
+
+
+def test_owner_back_consolidates_before_raising_oom():
+    # Owner returns to A (z, 1.0). B and C each hold a 0.5 spot: no GPU fits z until one moves.
+    verdicts = {
+        "A": v("A", GpuState.RECLAIMING, must=True, reasons=("owner back",)),
+        "B": v("B", GpuState.LENT),
+        "C": v("C", GpuState.LENT),
+    }
+    running = [
+        RunningSpot("b", frozenset({"B"}), ("A", "B", "C"), 0, share=0.5),
+        RunningSpot("c", frozenset({"C"}), ("A", "B", "C"), 1, share=0.5),
+        RunningSpot("z", frozenset({"A"}), ("A", "B", "C"), 2, share=1.0),
+    ]
+    actions = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    assert len(actions) == 1 and isinstance(actions[0], Move)
+    assert actions[0].reason == "making room for z" and {actions[0].src, actions[0].dst} == {"B", "C"}
+    assert not any(isinstance(a, Oom) for a in actions)
+
+
+def test_no_consolidation_when_nothing_is_waiting():
+    # Spread out but everyone fits: nothing moves.
+    verdicts = {"A": v("A", GpuState.LENT), "B": v("B", GpuState.LENT)}
+    running = [
+        RunningSpot("x", frozenset({"A"}), ("A", "B"), 0, share=0.5),
+        RunningSpot("y", frozenset({"B"}), ("A", "B"), 1, share=0.5),
+    ]
+    assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10) == []
+
+
+def test_oom_when_room_cannot_be_made():
+    verdicts = {
+        "A": v("A", GpuState.RECLAIMING, must=True, reasons=("owner back",)),
+        "B": v("B", GpuState.LENT),
+    }
+    running = [
+        RunningSpot("b", frozenset({"B"}), ("A", "B"), 0, share=0.75),
+        RunningSpot("z", frozenset({"A"}), ("A", "B"), 1, share=0.5),
+    ]
+    [oom] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    assert oom == Oom("z", "A", "owner back")
+
+
+def test_short_session_gets_its_full_limit_once_it_fits():
+    verdicts = {"A": v("A", GpuState.LENT)}
+    running = [RunningSpot("z", frozenset({"A"}), ("A",), 5, share=1.0, short=True)]
+    assert plan(verdicts, running, [], now=20, can_checkpoint=True, oom_grace=10) == [Resize("z", "A")]
+    running = [RunningSpot("z", frozenset({"A"}), ("A",), 5, share=1.0)]
+    assert plan(verdicts, running, [], now=20, can_checkpoint=True, oom_grace=10) == []
