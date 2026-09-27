@@ -30,7 +30,7 @@ log = logging.getLogger("ai.backend.labgpu.spot.ckpt")
 MIN_DRIVER_FOR_MOVE = 580
 CONTAINER_CUDA_CHECKPOINT = "/opt/labgpu/cuda-checkpoint"
 EVICT_MARKER = "/tmp/labgpu-spot-evicted"
-# The container env carries HAMi-core (LD_PRELOAD) and a reordered CUDA_VISIBLE_DEVICES meant for
+# The container env carries HAMi-core (LD_PRELOAD) and a one-GPU CUDA_VISIBLE_DEVICES meant for
 # the user's program; cuda-checkpoint itself must run without them.
 CLEAN_ENV = ("env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
 
@@ -211,10 +211,10 @@ echo "no python in the container" >&2; exit 1"""
 
 def spot_env(order: Sequence[str], limits: Sequence[int]) -> str:
     """
-    What a program started now must see (SPEC 2.12): the GPU the session currently uses first,
-    so it is cuda:0, and the HAMi-core limit per CUDA index (1 MiB for every GPU but that one).
+    What a program started now must see (SPEC 2.12): only the GPU the session currently uses, as
+    cuda:0, and the HAMi-core limit per index (1 MiB for every GPU but that one).
     """
-    lines = [f"CUDA_VISIBLE_DEVICES={','.join(order)}", f"LABGPU_SPOT_GPU={order[0]}"]
+    lines = [f"CUDA_VISIBLE_DEVICES={order[0]}", f"LABGPU_SPOT_GPU={order[0]}"]
     lines += [f"CUDA_DEVICE_MEMORY_LIMIT_{i}={max(b // (1 << 20), 1)}m" for i, b in enumerate(limits)]
     return "\n".join(lines) + "\n"
 

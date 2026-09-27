@@ -267,14 +267,15 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             return {}
         gpus = self._gpus or []
         chosen, lendable = await asyncio.to_thread(self._pick)
-        # The chosen GPU comes first so it is the program's cuda:0; the others stay attached
-        # for moving but get a 1 MiB cap (SPEC 2.12).
+        # Programs see only the chosen GPU (cuda:0), so they cannot touch the others at all; the
+        # others stay attached because cuda-checkpoint moves a process only to an attached GPU,
+        # visible to it or not (SPEC 2.12, checked on the lab servers).
         order = [chosen] + [g.uuid for g in gpus if g.uuid != chosen]
         env = {
             ENV_SPOT: "1",
             ENV_SPOT_UUIDS: ",".join(g.uuid for g in gpus),
             ENV_SPOT_GPU: chosen,
-            "CUDA_VISIBLE_DEVICES": ",".join(order),
+            "CUDA_VISIBLE_DEVICES": chosen,
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
             # SPEC 2.12: the out-of-memory error for a session that cannot be moved.
             "PYTHONPATH": CONTAINER_PYTHON_DIR,

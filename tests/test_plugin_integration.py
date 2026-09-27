@@ -274,7 +274,7 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert env["LABGPU_SPOT_UUIDS"] == "GPU-p6000-1,GPU-p6000-2"
     # The lendable GPU is cuda:0 with its lendable memory; the other one is capped at 1 MiB.
     assert env["LABGPU_SPOT_GPU"] == "GPU-p6000-2"
-    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-p6000-2,GPU-p6000-1"
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-p6000-2"  # only the chosen GPU
     assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "81920m"
     assert env["CUDA_DEVICE_MEMORY_LIMIT_1"] == "1m"
     assert asyncio.run(spot.get_hooks("ubuntu22.04", "x86_64")) == [fake_primary]

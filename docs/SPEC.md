@@ -378,11 +378,12 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은 대기(PENDING)합니다.
 - **GPU 고르기와 메모리 제한.** 새 스팟 세션이 쓸 GPU는 플러그인이 고릅니다. 현황 파일에서 LENDABLE이고
   스팟이 없으며 최근 120초 안에 다른 세션에 주지 않은 GPU 중 빌려줄 수 있는 메모리가 가장 큰 것입니다.
-  - 그 GPU를 `CUDA_VISIBLE_DEVICES`의 맨 앞에 두어 프로그램의 `cuda:0`이 되게 하고, HAMi-core로 메모리를
-    그 GPU의 빌려줄 수 있는 메모리(`lendable_memory`)로 제한합니다(`CUDA_DEVICE_MEMORY_LIMIT_0`).
-  - 같은 종류의 **나머지 GPU도 붙이지만 제한을 1MiB로** 둡니다(`CUDA_DEVICE_MEMORY_LIMIT_1..`). 프로그램은 그
-    GPU에 메모리를 잡을 수 없습니다. 붙이는 이유는 cuda-checkpoint가 프로세스에 보이는 GPU로만 옮길 수 있기
-    때문입니다. 옮길 때 원래 GPU와 대상 GPU를 맞바꾸므로 제한도 함께 따라갑니다.
+  - 프로그램에는 **그 GPU 하나만** 보이게 합니다(`CUDA_VISIBLE_DEVICES=<고른 GPU>`, 프로그램의 `cuda:0`). HAMi-core로
+    메모리를 그 GPU의 빌려줄 수 있는 메모리(`lendable_memory`)로 제한합니다(`CUDA_DEVICE_MEMORY_LIMIT_0`).
+    다른 GPU는 CUDA에 보이지 않으므로 컨텍스트조차 만들 수 없습니다.
+  - 같은 종류의 **나머지 GPU도 컨테이너에는 붙입니다.** cuda-checkpoint는 컨테이너에 붙은 GPU라면 프로세스의
+    `CUDA_VISIBLE_DEVICES`에 없어도 그리로 옮길 수 있습니다(2026-09-27 Primary 실측). `CUDA_DEVICE_MEMORY_LIMIT_1..`은
+    1MiB로 둡니다(`nvidia-smi` 표시용, 2.12 규칙 6 참고).
   - 환경변수: `LABGPU_SPOT=1`, `LABGPU_SPOT_UUIDS`(붙인 GPU 전체), `LABGPU_SPOT_GPU`(고른 GPU).
     `DeviceRequests`에는 NVML 인덱스로 넣습니다.
   - HAMi-core(`hook_path`, 기본 `<체크아웃>/.venv/lib/libvgpu.so`)가 없으면 메모리를 제한할 수 없으므로
@@ -430,16 +431,19 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 5. **멈춰 두기(Park)**: lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는 CUDA 호출에서
    기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore). 멈춰 둔 스팟은 새로 옮겨야
    하는 스팟보다 먼저 자리를 받습니다. 빈 GPU가 생길 때까지 **기한 없이** 기다립니다.
-6. **옮기거나 되살린 뒤의 GPU 순서와 제한.** 컨테이너 환경변수(`CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_*`)는
-   처음 값 그대로라, 그대로 두면 새로 뜨는 프로그램의 `cuda:0`이 **주인에게 돌아간 원래 GPU**가 됩니다. 그래서:
-   - HAMi-core 공유 제한을 `cuda:0`(지금 쓰는 GPU) = 그 GPU의 빌려줄 수 있는 메모리, 나머지 GPU(원래 GPU 포함) = 1MiB로
-     다시 맞춥니다. 옮겨 간 프로세스는 device-map으로 `cuda:0`이 새 GPU가 되므로 이 순서와 같습니다.
-   - `/tmp/labgpu-spot-env`에 지금 쓰는 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`와 위 제한을 씁니다(세션 사용자 소유).
-     새 파이썬 프로그램은 `sitecustomize`가, 새 셸은 `/etc/profile.d/labgpu-spot.sh`(읽기 전용 마운트, 비대화형
-     bash는 `BASH_ENV`)가 CUDA가 시작되기 전에 이 값을 가져가므로 `nvidia-smi`와 새 프로그램이 지금 GPU를 첫째로 봅니다.
-   - 이미 떠 있던 셸이나 이 파일을 거치지 않는 프로그램은 처음 순서를 봅니다. 그런 프로그램이 원래 GPU에 메모리를
-     잡으면 감시기는 그것을 스팟 프로세스로 보고, 스팟이 GPU 두 장에 걸친 것이 되어 규칙 8(OOM 오류)이 적용됩니다.
-     제한이 1MiB라 원래 GPU에 실제로 잡을 수 있는 양도 없습니다.
+6. **옮기거나 되살린 뒤.** 컨테이너 환경변수(`CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_*`)는 처음 값 그대로라,
+   그대로 두면 새로 뜨는 프로그램이 **주인에게 돌아간 원래 GPU**를 봅니다. 그래서:
+   - HAMi-core 공유 제한 index 0(모든 프로그램의 `cuda:0`) = 지금 GPU의 빌려줄 수 있는 메모리(MiB 단위), 나머지 = 1MiB.
+     옮겨 간 프로세스도 device-map으로 `cuda:0`이 지금 GPU입니다.
+   - `/tmp/labgpu-spot-env`에 `CUDA_VISIBLE_DEVICES=<지금 GPU>`와 위 제한을 씁니다(세션 사용자 소유). 새 파이썬
+     프로그램은 `sitecustomize`가, 새 셸은 `/etc/profile.d/labgpu-spot.sh`(읽기 전용 마운트, 비대화형 bash는 `BASH_ENV`)가
+     CUDA가 시작되기 전에 이 값을 가져가 지금 GPU 하나만 봅니다.
+   - 이미 떠 있던 셸이나 이 파일을 거치지 않는 프로그램은 처음 GPU를 봅니다. 그런 프로그램이 원래 GPU를 쓰면
+     감시기는 스팟이 GPU 두 장에 걸친 것으로 보고 규칙 8(OOM 오류)을 적용합니다.
+   - **알려진 한계: 컨테이너 안 `nvidia-smi` 표시.** `nvidia-smi`는 `CUDA_VISIBLE_DEVICES`를 따르지 않고 붙은 GPU를
+     모두 PCI 순서로 나열하며, HAMi-core는 제한과 사용량을 그 순서의 index에 붙여 보여 줍니다(2026-09-27 Primary 실측).
+     그래서 지금 GPU가 PCI 순서의 첫째가 아니면(처음부터 뒤쪽 GPU를 받았거나 옮긴 뒤) 제한과 사용량이 엉뚱한 GPU에
+     표시됩니다. 실제 제한(프로그램이 쓸 수 있는 양)은 맞습니다. HAMi-core를 고치지 않고는 표시를 맞출 방법이 없습니다.
 7. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기거나 멈춰 둘 수 없으므로
    4의 OOM 오류만 냅니다(`oom_grace_seconds`마다 다시). 처리기가 없거나 오류를 잡고 계속 돌면 주인 GPU를 함께
    쓰게 되므로, cuda-checkpoint가 동작하는 노드에서만 스팟을 켜는 것이 맞습니다. 이동이 실패하면 OOM 오류를 냅니다.

@@ -408,7 +408,7 @@ def test_place_blocks_every_gpu_but_the_current_one():
     limits, env_text = eval(argv[6]), argv[9]
     assert limits == [(0, 10 << 30), (1, 1 << 20), (2, 1 << 20)]
     assert env_text.splitlines() == [
-        "CUDA_VISIBLE_DEVICES=GPU-b,GPU-a,GPU-c", "LABGPU_SPOT_GPU=GPU-b",
+        "CUDA_VISIBLE_DEVICES=GPU-b", "LABGPU_SPOT_GPU=GPU-b",
         "CUDA_DEVICE_MEMORY_LIMIT_0=10240m", "CUDA_DEVICE_MEMORY_LIMIT_1=1m", "CUDA_DEVICE_MEMORY_LIMIT_2=1m",
     ]
 
