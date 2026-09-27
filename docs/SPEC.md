@@ -462,8 +462,12 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
       다시 닫습니다.
     - 스팟 세션 사용자는 컨테이너 안에서 `sudo`를 쓸 수 있으므로 권한을 되돌릴 수 있습니다(알고 받아들인 한계).
       그렇게 다른 GPU를 쓰면 위의 `held` 규칙이 감시 주기 안에 잡습니다.
-    - 멈춰 둔 세션은 GPU가 없으므로 붙은 장치를 **모두** 닫습니다. 되살릴 때 대상만 열고, 되살리기나 이동이 실패하면
-      연 대상을 다시 닫습니다. `held`로 잡은 뒤에는 권한을 다시 적용합니다.
+    - **cuda-checkpoint가 일하는 동안(옮기기, 멈춰 두기, 되살리기)은 붙은 장치를 모두 엽니다.** 세션 사용자로 실행하면
+      파일 권한을 따르는데, 체크포인트 때는 프로세스가 거쳐 간 GPU가, 되살릴 때는 원래 GPU와 대상 GPU가 모두 열려 있어야
+      합니다(닫혀 있으면 `invalid argument`, `operation not supported`. 2026-09-27 Primary 실측). 끝나면 성공이든 실패든
+      지금 쓰는 GPU 하나만 남기고 닫습니다. 이 몇 초 동안 생기는 틈은 `held` 규칙이 보완합니다.
+    - 멈춰 둔 세션은 GPU가 없으므로 붙은 장치를 **모두** 닫습니다(멈춰 두는 작업 안에서 바로). `held`로 잡은 뒤에는
+      권한을 다시 적용합니다.
     - 컨테이너 안의 제한(HAMi-core, 환경변수, `sitecustomize`)은 보안 경계가 아닙니다. 컨테이너 안 프로그램이
       `CUDA_VISIBLE_DEVICES`를 바꾸면 다른 GPU가 HAMi-core의 index 0이 되어 큰 제한을 받고(2026-09-27 Primary 실측:
       빌리지 않은 GPU에 10GB 할당 성공), 공유 제한 파일도 세션 사용자 소유라 고칠 수 있습니다. 믿을 수 있는 경계는
@@ -592,7 +596,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | HAMi-core 패치(`6ca9d42`) 단독 시험: 빌드 성공. `nvidia-smi` 0.06초에 끝남. 스팟(`LABGPU_SPOT=1`)은 받은 GPU에만 제한, 나머지 1MiB(받은 GPU가 NVML 0번이든 1번이든). 주인 방식은 다른 GPU가 실제 값. torch 제한·OOM이 패치 전과 같고(주인 쪽 두 GPU 각각 제한도 같음), `host pid is error`가 사라짐. `Driver error at 192: 101`, `Process slot not found`는 패치 전부터 있던 것 | 확인 (2026-09-27, Primary 단독 컨테이너, Primary에 설치함). Backend.AI 세션 안과 Secondary는 UNVERIFIED |
 | 장치 파일 권한(`0210937`): 받은 GPU만 `666`, 나머지 `000`(minor가 호스트 `Device Minor`와 일치). `CUDA_VISIBLE_DEVICES=B,A`나 `B`는 `No CUDA GPUs are available`로 막힘. root `chmod`에 HAMi-core 오류 없음. `sudo chmod 666`으로 풀고 10GB를 잡으면 4.4초 뒤 `held`, 정상 학습은 영향 없음. 이동 때 권한이 새 GPU로 바뀜(빈틈 3.31초), OOM 뒤 60초에 멈춰 둠 | 확인 (2026-09-27 19:56~20:02, Primary) |
 | 같은 시험의 문제: (1) 멈춰 둔 세션 되살리기가 5초마다 실패(로그에 cuda-checkpoint 자체 오류가 안 남음) (2) 그동안 두 GPU 장치가 모두 `666`으로 열려 있음(실패한 대상을 닫지 않음) (3) `held` 뒤에도 풀린 권한을 다시 닫지 않음 (4) 멈춰 둔 동안 주인에게 돌아간 GPU 장치가 열려 있음. 고침: 오류에 표준 출력까지 남김, 실패한 대상은 닫음, `held` 뒤 권한 다시 적용, 멈춰 둔 세션은 장치를 모두 닫음 | 문제 확인 (2026-09-27, Primary). 수정본 UNVERIFIED, 되살리기 실패 원인은 새 로그로 확인 필요 |
-| `6ca9d42` + 패치 HAMi 재시험: 새 세션과 이동 뒤 `nvidia-smi`가 받은 GPU 한 줄만 보임(표시 문제 해결), host pid 경고 없음, 이동 빈틈 3.42초, OOM 0.1초, 60초 뒤 멈춤. 문제: (1) 되살리기 `rc=1`, cuda-checkpoint `Could not restore on process ID 398: "invalid argument"`(장치 권한 차단 전 `903285a`에서는 같은 경로 성공) (2) 멈춘 직후 약 3초 동안 주인 GPU 장치가 `666`(닫기를 다음 주기로 미뤘음). (2)는 멈춰 두기 작업 안에서 바로 닫도록 고침, (1)은 원인 확인 중 | 확인 (2026-09-27 20:55~21:00, Primary) |
+| `6ca9d42` + 패치 HAMi 재시험: 새 세션과 이동 뒤 `nvidia-smi`가 받은 GPU 한 줄만 보임(표시 문제 해결), host pid 경고 없음, 이동 빈틈 3.42초, OOM 0.1초, 60초 뒤 멈춤. 문제: (1) 되살리기 `rc=1`, cuda-checkpoint `Could not restore on process ID 398: "invalid argument"`(장치 권한 차단 전 `903285a`에서는 같은 경로 성공) (2) 멈춘 직후 약 3초 동안 주인 GPU 장치가 `666`(닫기를 다음 주기로 미뤘음). (2)는 멈춰 두기 작업 안에서 바로 닫도록 고침. (1)의 원인은 장치 권한: 체크포인트 때 거쳐 간 GPU, 되살릴 때 원래·대상 GPU가 모두 열려 있어야 함(Backend.AI 밖 컨테이너, 세션 사용자 uid 실험. root는 권한을 무시해 드러나지 않음). cuda-checkpoint 작업 중에는 모두 열도록 고침 | 확인 (2026-09-27 20:55~21:00, Primary) |
 | 감시기가 옮긴 뒤 새로 띄운 CUDA 프로세스마다 HAMi-core `host pid is error!`, `SET_TASK_PID FAILED - using container PID for accounting`. 이동 전에는 없음. `nvidia-smi` 표시처럼 HAMi-core가 CUDA index와 NVML(PCI) index를 같다고 보는 탓으로 추정. 사용량 기록이 컨테이너 PID 기준이 되어 제한 정확도에 영향이 있는지는 미확인 | 확인 (2026-09-27, Primary). 원인·영향 UNVERIFIED |
 | root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |

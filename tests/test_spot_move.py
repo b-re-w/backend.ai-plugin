@@ -567,8 +567,13 @@ def test_device_files_are_gated_and_follow_moves(tmp_path):
     c.tick(90)
     move = ck.calls[1]
     dst = int(move[3][-1])
-    assert ck.calls[0] == ("gate", (dst,), ()) and move[0] == "move"
-    assert ck.calls[2] == ("gate", (), (0,)) and ck.calls[3][0] == "place"
+    # Every device open while cuda-checkpoint works, then only the new GPU.
+    assert ck.calls[0] == ("gate", (0, 1, 2), ()) and move[0] == "move"
+    assert ck.calls[2] == ("gate", (dst,), tuple(m for m in (0, 1, 2) if m != dst))
+    assert ck.calls[3][0] == "place"
+    spot_proc = next(x for x in procs[0] if x[3] == SPOT)
+    procs[0].remove(spot_proc)
+    procs[dst] = [spot_proc]  # it now runs on the new GPU
     c.tick(95)
     assert c.gated[SPOT] == f"GPU-{dst}" and not any(x[0] == "gate" for x in ck.calls[4:])
 
@@ -586,7 +591,7 @@ def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
     ck.calls.clear()
     c.tick(80)  # parked, and in the same step every device closed
-    assert ck.calls == [("park", (20,)), ("gate", (), (0, 1, 2))]
+    assert ck.calls == [("gate", (0, 1, 2), ()), ("park", (20,)), ("gate", (), (0, 1, 2))]
     procs[0].pop()
     ck.calls.clear()
     c.tick(85)
@@ -601,5 +606,6 @@ def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_
     ck.calls.clear()
     for t in (90, 160):
         c.tick(t)
-    assert ("gate", (2,), ()) in ck.calls and ("restore-failed", "GPU-2") in ck.calls
-    assert ck.calls[ck.calls.index(("restore-failed", "GPU-2")) + 1] == ("gate", (), (2,))  # closed again
+    i = ck.calls.index(("restore-failed", "GPU-2"))
+    assert ck.calls[i - 1] == ("gate", (0, 1, 2), ())  # all open for cuda-checkpoint
+    assert ck.calls[i + 1] == ("gate", (), (0, 1, 2))  # still parked: all closed again

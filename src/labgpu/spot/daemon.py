@@ -12,8 +12,10 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from types import SimpleNamespace
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -285,6 +287,22 @@ class Controller:
         if a or d:
             self.checkpointer.gate(cid, a, d)
 
+    @contextmanager
+    def _all_open(self, cid: str, visible: Sequence[str]) -> Iterator[SimpleNamespace]:
+        """
+        Every attached device open while cuda-checkpoint works on the session: it needs the GPUs
+        the process has used at checkpoint time and both source and target at restore time
+        (2026-09-27 Primary measurement; the session user is subject to file permissions). On the
+        way out, success or not, only `end.state` stays open ("" = none) (SPEC 2.12 rule 10).
+        """
+        end = SimpleNamespace(state="")
+        self._gate(cid, allow=list(visible))
+        try:
+            yield end
+        finally:
+            keep = [end.state] if end.state else []
+            self._gate(cid, allow=keep, deny=[u for u in visible if u not in keep])
+
     def _gate_new(self, spots: list[SpotContainer]) -> None:
         """
         A spot container can open only the GPU it was given, from the first time it is seen; a
@@ -313,14 +331,10 @@ class Controller:
                 log.info("spot %s: move %s -> %s (%s) pids=%s", cid[:12], src, dst, reason, pids)
 
                 def job() -> None:
-                    # Open the target GPU's device file only for the move, then close the old one.
-                    self._gate(cid, allow=[dst])
-                    try:
+                    with self._all_open(cid, visible) as end:
+                        end.state = src  # if the move fails it stays where it was
                         ck.move(cid, pids, src, dst, visible)
-                    except CheckpointError:
-                        self._gate(cid, deny=[dst])
-                        raise
-                    self._gate(cid, deny=[src])
+                        end.state = dst
                     ck.place(cid, pids[0], self._order(visible, dst), size)
 
                 fallback = self._oom_job(cid, pids, self._order(visible, src), reason)
@@ -330,10 +344,12 @@ class Controller:
                 log.info("spot %s: park off %s (%s) pids=%s", cid[:12], src, reason, pids)
 
                 def park_job() -> None:
-                    ck.park(cid, pids)
-                    # Nothing of it is on a GPU now: close every device in the same step, so no
-                    # new program can open the GPU just handed back to its owner (SPEC 2.12).
-                    self._gate(cid, deny=list(visible))
+                    with self._all_open(cid, visible) as end:
+                        end.state = src
+                        ck.park(cid, pids)
+                        # Nothing of it is on a GPU now: every device closed in the same step,
+                        # so no new program can open the GPU just handed back to its owner.
+                        end.state = ""
 
                 self._submit(action, park_job, None, record)
                 return
@@ -343,15 +359,10 @@ class Controller:
                 log.info("spot %s: restore parked %s -> %s", cid[:12], src, dst)
 
                 def job() -> None:
-                    self._gate(cid, allow=[dst])
-                    try:
+                    with self._all_open(cid, record.spot.allowed) as end:
+                        end.state = ""  # still parked if it fails: no device
                         ck.restore(cid, record.pids, src, dst, record.spot.allowed)
-                    except CheckpointError:
-                        if dst != self.assigned.get(cid):
-                            self._gate(cid, deny=[dst])  # never leave a failed target open
-                        raise
-                    if src != dst:
-                        self._gate(cid, deny=[src])
+                        end.state = dst
                     ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
 
                 fallback = None
@@ -361,7 +372,14 @@ class Controller:
                 record = ParkedRecord(
                     ParkedSpot(cid, gpus[0], visible, now), pids, sum(self._mem_on(cid, g) for g in gpus), hold=True
                 )
-                self._submit(action, lambda: ck.park(cid, pids), None, record)
+                home = self.assigned.get(cid, "")
+
+                def hold_job() -> None:
+                    with self._all_open(cid, visible) as end:
+                        end.state = home
+                        ck.park(cid, pids)
+
+                self._submit(action, hold_job, None, record)
                 return
             case Oom(_, gpu, reason):
                 # Per process (SPEC 2.12): one that installed the handler gets the error; one that
@@ -388,7 +406,9 @@ class Controller:
                         self.oomed[cid] = now  # the tick's clock, as placement compares with it
                     if silent:
                         try:
-                            ck.park(cid, silent)
+                            with self._all_open(cid, visible) as end:
+                                end.state = gpu  # the others keep running there
+                                ck.park(cid, silent)
                         except CheckpointError as e:
                             raise CheckpointError(f"processes {silent} are still on the GPU: {e}") from e
 
