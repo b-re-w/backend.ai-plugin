@@ -84,6 +84,19 @@ def has_handler(host_pid: int, signum: int, proc_root: Path = Path("/proc")) -> 
     return False
 
 
+def device_minor(pci_bus_id: str, proc_root: Path = Path("/proc")) -> int | None:
+    """/dev/nvidia<minor> of a GPU, from the driver's world-readable /proc information file."""
+    domain, _, rest = pci_bus_id.partition(":")
+    bus = f"{domain[-4:]}:{rest}".lower()
+    try:
+        for line in (proc_root / "driver" / "nvidia" / "gpus" / bus / "information").read_text().splitlines():
+            if line.startswith("Device Minor:"):
+                return int(line.split(":", 1)[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 class DockerExec:
     """Runs a command inside a container through the Docker daemon."""
 
@@ -154,6 +167,16 @@ class CudaCheckpoint:
             # Put it back where it was rather than leave it frozen.
             self._try(lambda: self.restore(cid, pids, src, src, visible))
             raise
+
+    def gate(self, cid: str, allow: Sequence[int], deny: Sequence[int]) -> None:
+        """
+        Device-file permissions inside the container (SPEC 2.12 rule 10): only the GPU the session
+        was given can be opened; the others stay attached for moving but mode 000. As root (the
+        files belong to root); a spot user with sudo can undo it, which rule 10's hold still catches.
+        """
+        cmds = [f"chmod 666 /dev/nvidia{m}" for m in allow] + [f"chmod 000 /dev/nvidia{m}" for m in deny]
+        if cmds:
+            self.run(cid, "sh", "-c", "; ".join(cmds), user="root")
 
     def place(self, cid: str, pid: int, order: Sequence[str], size: int) -> None:
         place(cid, pid, order=order, size=size, run=self.run, identify=self.identify)

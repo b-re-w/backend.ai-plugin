@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
-from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, has_handler
+from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, device_minor, has_handler
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
@@ -59,6 +59,14 @@ class ParkedRecord:
         return cls(spot, tuple(int(p) for p in d["pids"]), int(d["memory"]), bool(d.get("hold")))
 
 
+@dataclass(frozen=True)
+class Gate:
+    """Internal operation: set a spot container's device-file permissions."""
+
+    container_id: str
+    gpu: str
+
+
 class Controller:
     def __init__(
         self,
@@ -88,6 +96,8 @@ class Controller:
         self.oomed: dict[str, float] = {}  # container -> when its program got the out-of-memory error
         self.assigned: dict[str, str] = {}  # container -> the GPU it was given (and moved to)
         self.held: dict[str, ParkedRecord] = {}  # processes caught on GPUs they were not given
+        self.gated: dict[str, str] = {}  # container -> the GPU its device files are opened for
+        self.minors: dict[str, int | None] = {}  # GPU uuid -> /dev/nvidia<minor>
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
@@ -145,6 +155,8 @@ class Controller:
             del self.assigned[cid]
         for cid in [c for c in self.held if c not in self.spot_info]:
             del self.held[cid]
+        for cid in [c for c in self.gated if c not in self.spot_info]:
+            del self.gated[cid]
         observations = self._observe(now, owners, spots, docker_ok)
         self.last_obs = {o.uuid: o for o in observations}
         busy_gpus = self._busy_gpus()
@@ -175,6 +187,9 @@ class Controller:
     ) -> list[GpuObservation]:
         try:
             self._gpu_list = self.gpus.list_gpus()
+            for g in self._gpu_list:
+                if g.uuid not in self.minors:
+                    self.minors[g.uuid] = device_minor(g.pci_bus_id)
         except NvmlError as e:
             log.error("NVML unavailable: %s", e)
             return [
@@ -261,6 +276,23 @@ class Controller:
         )
         for action in actions:
             self._dispatch(action, now)
+        self._gate_new(spots)
+
+    def _gate(self, cid: str, allow: Sequence[str] = (), deny: Sequence[str] = ()) -> None:
+        """chmod the containers' /dev/nvidia<minor> files (SPEC 2.12 rule 10); unknown minors skipped."""
+        a = [self.minors[u] for u in allow if self.minors.get(u) is not None]
+        d = [self.minors[u] for u in deny if self.minors.get(u) is not None]
+        if a or d:
+            self.checkpointer.gate(cid, a, d)
+
+    def _gate_new(self, spots: list[SpotContainer]) -> None:
+        """A spot container can open only the GPU it was given, from the first time it is seen."""
+        for s in spots:
+            gpu = self.assigned.get(s.id)
+            if not gpu or self.gated.get(s.id) == gpu or s.id in self.busy:
+                continue
+            others = [u for u in s.uuids if u != gpu]
+            self._submit(Gate(s.id, gpu), lambda s=s, gpu=gpu, others=others: self._gate(s.id, [gpu], others), None, None)
 
     def _lendable(self, uuid: str) -> int:
         v = self.last_verdicts.get(uuid)
@@ -277,7 +309,14 @@ class Controller:
                 log.info("spot %s: move %s -> %s (%s) pids=%s", cid[:12], src, dst, reason, pids)
 
                 def job() -> None:
-                    ck.move(cid, pids, src, dst, visible)
+                    # Open the target GPU's device file only for the move, then close the old one.
+                    self._gate(cid, allow=[dst])
+                    try:
+                        ck.move(cid, pids, src, dst, visible)
+                    except CheckpointError:
+                        self._gate(cid, deny=[dst])
+                        raise
+                    self._gate(cid, deny=[src])
                     ck.place(cid, pids[0], self._order(visible, dst), size)
 
                 fallback = self._oom_job(cid, pids, self._order(visible, src), reason)
@@ -293,7 +332,10 @@ class Controller:
                 log.info("spot %s: restore parked %s -> %s", cid[:12], src, dst)
 
                 def job() -> None:
+                    self._gate(cid, allow=[dst])
                     ck.restore(cid, record.pids, src, dst, record.spot.allowed)
+                    if src != dst:
+                        self._gate(cid, deny=[src])
                     ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
 
                 fallback = None
@@ -395,6 +437,9 @@ class Controller:
                 changed = True
             elif isinstance(action, (Move, Restore)) and ok:
                 self.assigned[cid] = action.dst
+                self.gated[cid] = action.dst
+            elif isinstance(action, Gate) and ok:
+                self.gated[cid] = action.gpu
             if isinstance(action, (Park, Oom)) and ok and record is not None:
                 old = self.parked.get(cid)
                 # A session may be parked in parts (processes without the handler first).

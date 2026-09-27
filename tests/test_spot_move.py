@@ -195,6 +195,9 @@ class FakeCkpt:
     def restore(self, cid, pids, src, dst, visible):
         self.calls.append(("restore", tuple(pids), src, dst))
 
+    def gate(self, cid, allow, deny):
+        self.calls.append(("gate", tuple(allow), tuple(deny)))
+
     def place(self, cid, pid, order, size):
         self.calls.append(("place", pid, tuple(order), size))
 
@@ -533,3 +536,38 @@ def test_moves_update_the_assigned_gpu(tmp_path):
     procs[int(dst[-1])] = [(20, 30 * GiB, 90, SPOT)]
     c.tick(95)
     assert c.assigned[SPOT] == dst and not any(call[0] == "park" for call in ck.calls)
+
+
+@__import__("pytest").mark.skipif(__import__("os").name == "nt", reason="':' in a directory name")
+def test_device_minor_from_proc(tmp_path):
+    from labgpu.spot.ckpt import device_minor
+
+    d = tmp_path / "driver" / "nvidia" / "gpus" / "0000:3b:00.0"
+    d.mkdir(parents=True)
+    (d / "information").write_text("Model: NVIDIA RTX PRO 6000" + chr(10) + "Device Minor: 2" + chr(10))
+    assert device_minor("00000000:3B:00.0", tmp_path) == 2
+    assert device_minor("00000000:AA:00.0", tmp_path) is None
+
+
+def test_device_files_are_gated_and_follow_moves(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    c.minors = {"GPU-0": 0, "GPU-1": 1, "GPU-2": 2}
+    c.tick(0)
+    assert ck.calls == [("gate", (0,), (1, 2))]  # from the first sight: only its GPU opens
+    c.tick(1)
+    assert len(ck.calls) == 1  # once
+    for t in (30, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(80)
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    ck.calls.clear()
+    c.tick(90)
+    move = ck.calls[1]
+    dst = int(move[3][-1])
+    assert ck.calls[0] == ("gate", (dst,), ()) and move[0] == "move"
+    assert ck.calls[2] == ("gate", (), (0,)) and ck.calls[3][0] == "place"
+    c.tick(95)
+    assert c.gated[SPOT] == f"GPU-{dst}" and not any(x[0] == "gate" for x in ck.calls[4:])
