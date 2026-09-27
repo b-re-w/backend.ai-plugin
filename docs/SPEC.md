@@ -280,7 +280,9 @@ GPU마다 다음을 모읍니다. 하나라도 실패하면 그 GPU는 **UNKNOWN
 - Docker: 실행 중인 소유자 컨테이너와 그 GPU(UUID) 목록. 다음 순서로 찾습니다.
   1. 환경변수 `LABGPU_DEVICE_UUIDS` (cuda_frac 플러그인)
   2. `HostConfig.DeviceRequests[].DeviceIDs` (Driver `nvidia`; `GPU-`로 시작하면 UUID, 아니면 NVML 인덱스)
-  3. 환경변수 `NVIDIA_VISIBLE_DEVICES` (값이 `all`이면 모든 GPU)
+  3. 환경변수 `NVIDIA_VISIBLE_DEVICES` (값이 `all`이면 모든 GPU). **컨테이너 런타임이 `nvidia`일 때만** 봅니다. CUDA
+     이미지는 이 값을 기본으로 `all`로 두므로, GPU를 받지 않은 CPU 세션(`runc`, `DeviceRequests` 없음)이 모든 GPU의
+     소유자로 잡혀 30분 대기 규칙 때문에 스팟 자리가 0이 되던 문제가 있었습니다(2026-09-28 Secondary).
 - 소유자 컨테이너 CPU 사용량: `State.Pid`의 cgroup v2 `cpu.stat`의 `usage_usec` 변화량 / 경과 시간.
   읽을 수 없으면 CPU 조건은 건너뜁니다.
 

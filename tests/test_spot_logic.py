@@ -113,7 +113,12 @@ def test_parse_gpu_refs_precedence():
     assert parse_gpu_refs({"Config": {"Env": ["LABGPU_DEVICE_UUIDS=GPU-a,GPU-b"]}}) == ("GPU-a", "GPU-b")
     assert parse_gpu_refs({"HostConfig": {"DeviceRequests": [
         {"Driver": "nvidia", "DeviceIDs": ["0", "2"]}]}}) == ("0", "2")
-    assert parse_gpu_refs({"Config": {"Env": ["NVIDIA_VISIBLE_DEVICES=all"]}}) == ("all",)
+    nvidia = {"Runtime": "nvidia"}
+    assert parse_gpu_refs({"HostConfig": nvidia, "Config": {"Env": ["NVIDIA_VISIBLE_DEVICES=all"]}}) == ("all",)
+    # CUDA images set NVIDIA_VISIBLE_DEVICES=all by default; without the nvidia runtime and
+    # DeviceRequests the container has no GPU at all.
+    assert parse_gpu_refs({"HostConfig": {"Runtime": "runc"}, "Config": {"Env": ["NVIDIA_VISIBLE_DEVICES=all"]}}) == ()
+    assert parse_gpu_refs({"Config": {"Env": ["NVIDIA_VISIBLE_DEVICES=all"]}}) == ()
     assert parse_gpu_refs({"Config": {"Env": ["NVIDIA_VISIBLE_DEVICES=void"]}}) == ()
 
 

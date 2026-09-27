@@ -68,6 +68,11 @@ def parse_gpu_refs(inspect: Mapping[str, Any]) -> tuple[str, ...]:
             refs.extend(req.get("DeviceIDs") or [])
     if refs:
         return tuple(refs)
+    # NVIDIA_VISIBLE_DEVICES only attaches GPUs under the nvidia runtime. CUDA images set it to
+    # "all" by default, so a CPU-only session (runc, no DeviceRequests) would otherwise count
+    # as the owner of every GPU and block lending (seen on Secondary, 2026-09-28).
+    if (inspect.get("HostConfig") or {}).get("Runtime") != "nvidia":
+        return ()
     visible = env.get("NVIDIA_VISIBLE_DEVICES", "")
     if visible in ("", "void", "none"):
         return ()
