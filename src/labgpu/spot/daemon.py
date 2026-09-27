@@ -26,7 +26,7 @@ from .docker import DockerError, OwnerContainer, SpotContainer
 from .hostinfo import CpuSampler
 from .model import GpuObservation, GpuVerdict, ProcKind
 from .observer import observe
-from .placement import Action, Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
+from .placement import Action, Hold, Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
 
 log = logging.getLogger("ai.backend.labgpu.spot")
 
@@ -47,15 +47,16 @@ class ParkedRecord:
     spot: ParkedSpot
     pids: tuple[int, ...]
     memory: int  # GPU memory it held before parking
+    hold: bool = False  # taken off a GPU it was not given: never restored automatically
 
     def to_json(self) -> dict:
         return {**asdict(self.spot), "allowed": list(self.spot.allowed), "pids": list(self.pids),
-                "memory": self.memory}
+                "memory": self.memory, "hold": self.hold}
 
     @classmethod
     def from_json(cls, d: dict) -> ParkedRecord:
         spot = ParkedSpot(d["container_id"], d["src"], tuple(d["allowed"]), float(d["since"]))
-        return cls(spot, tuple(int(p) for p in d["pids"]), int(d["memory"]))
+        return cls(spot, tuple(int(p) for p in d["pids"]), int(d["memory"]), bool(d.get("hold")))
 
 
 class Controller:
@@ -85,6 +86,8 @@ class Controller:
         self.parked: dict[str, ParkedRecord] = {}
         self.busy: dict[str, str] = {}  # container -> operation in flight
         self.oomed: dict[str, float] = {}  # container -> when its program got the out-of-memory error
+        self.assigned: dict[str, str] = {}  # container -> the GPU it was given (and moved to)
+        self.held: dict[str, ParkedRecord] = {}  # processes caught on GPUs they were not given
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
@@ -110,16 +113,18 @@ class Controller:
 
     def _load_parked(self) -> None:
         try:
-            raw = json.loads(self._parked_path.read_text())
-            self.parked = {d["container_id"]: ParkedRecord.from_json(d) for d in raw}
+            records = [ParkedRecord.from_json(d) for d in json.loads(self._parked_path.read_text())]
+            self.parked = {r.spot.container_id: r for r in records if not r.hold}
+            self.held = {r.spot.container_id: r for r in records if r.hold}
         except (OSError, ValueError, KeyError, TypeError):
-            self.parked = {}
+            self.parked, self.held = {}, {}
         if self.parked:
             log.warning("resuming %d parked spot sessions from %s", len(self.parked), self._parked_path)
 
     def _save_parked(self) -> None:
         tmp = self._parked_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps([r.to_json() for r in self.parked.values()]))
+        records = [*self.parked.values(), *self.held.values()]
+        tmp.write_text(json.dumps([r.to_json() for r in records]))
         os.replace(tmp, self._parked_path)
 
     # ---- one tick ----
@@ -133,6 +138,13 @@ class Controller:
             log.error("docker unavailable, treating all GPUs as unknown: %s", e)
             owners, spots, docker_ok = [], [], False
         self.spot_info = {s.id: s for s in spots}
+        for s in spots:
+            if s.gpu:
+                self.assigned.setdefault(s.id, s.gpu)
+        for cid in [c for c in self.assigned if c not in self.spot_info]:
+            del self.assigned[cid]
+        for cid in [c for c in self.held if c not in self.spot_info]:
+            del self.held[cid]
         observations = self._observe(now, owners, spots, docker_ok)
         self.last_obs = {o.uuid: o for o in observations}
         busy_gpus = self._busy_gpus()
@@ -205,6 +217,7 @@ class Controller:
                 self.spot_info[cid].uuids if cid in self.spot_info else tuple(gs),
                 min(self.spot_seen[(cid, g)] for g in gs),
                 oom_ready=any(self.handler_check(pid) for pid in self._pids_on(cid, None)),
+                assigned=self.assigned.get(cid),
             )
             for cid, gs in gpus_of.items()
         ]
@@ -284,6 +297,14 @@ class Controller:
                     ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
 
                 fallback = None
+            case Hold(_, gpus, reason):
+                pids = tuple(dict.fromkeys(p for g in gpus for p in self._pids_on(cid, g)))
+                log.warning("spot %s: %s; parking pids=%s and holding them", cid[:12], reason, pids)
+                record = ParkedRecord(
+                    ParkedSpot(cid, gpus[0], visible, now), pids, sum(self._mem_on(cid, g) for g in gpus), hold=True
+                )
+                self._submit(action, lambda: ck.park(cid, pids), None, record)
+                return
             case Oom(_, gpu, reason):
                 # Per process (SPEC 2.12): one that installed the handler gets the error; one that
                 # did not is parked right away so it does not keep the owner's GPU.
@@ -366,6 +387,14 @@ class Controller:
         for action, ok, record in done:
             cid = action.container_id
             self.busy.pop(cid, None)
+            if isinstance(action, Hold) and ok and record is not None:
+                old = self.held.get(cid)
+                self.held[cid] = (
+                    replace(old, pids=tuple(dict.fromkeys(old.pids + record.pids))) if old else record
+                )
+                changed = True
+            elif isinstance(action, (Move, Restore)) and ok:
+                self.assigned[cid] = action.dst
             if isinstance(action, (Park, Oom)) and ok and record is not None:
                 old = self.parked.get(cid)
                 # A session may be parked in parts (processes without the handler first).
@@ -404,6 +433,10 @@ class Controller:
             "parked": [
                 {"container": c[:12], "from": r.spot.src, "since": r.spot.since}
                 for c, r in self.parked.items()
+            ],
+            "held": [
+                {"container": c[:12], "from": r.spot.src, "pids": list(r.pids), "since": r.spot.since}
+                for c, r in self.held.items()
             ],
             "busy": {c[:12]: op for c, op in self.busy.items()},
         }

@@ -29,6 +29,7 @@ class RunningSpot:
     allowed: tuple[str, ...]  # GPUs attached to the container
     since: float  # when the monitor first saw it on its current GPU
     oom_ready: bool = True  # at least one process has the out-of-memory signal handler installed
+    assigned: str | None = None  # the GPU this session was given (None: not known)
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,16 @@ class Oom:
     reason: str
 
 
-Action = Move | Park | Restore | Oom
+@dataclass(frozen=True)
+class Hold:
+    """Processes on GPUs the session was not given: off those GPUs at once, not restored."""
+
+    container_id: str
+    gpus: tuple[str, ...]
+    reason: str
+
+
+Action = Move | Park | Restore | Oom | Hold
 
 
 def plan(
@@ -127,6 +137,12 @@ def plan(
 
     for s in sorted(running, key=lambda s: s.since):
         if s.container_id in busy:
+            continue
+        # The spot side is not trusted (SPEC 2.12): a process on any GPU but the one the session
+        # was given, e.g. after changing CUDA_VISIBLE_DEVICES, leaves that GPU right away.
+        off = tuple(sorted(s.gpus - {s.assigned})) if s.assigned else ()
+        if off:
+            actions.append(Hold(s.container_id, off, f"on GPU(s) it was not given: {', '.join(off)}"))
             continue
         src = sorted(s.gpus)[0]
         v = verdicts.get(src)

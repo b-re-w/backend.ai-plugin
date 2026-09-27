@@ -449,6 +449,15 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
    쓰게 되므로, cuda-checkpoint가 동작하는 노드에서만 스팟을 켜는 것이 맞습니다. 이동이 실패하면 OOM 오류를 냅니다.
 8. GPU를 둘 이상 쓰는 스팟 세션에는 OOM 오류를 냅니다.
 9. 세션 자체는 끝내지 않습니다. 다시 GPU를 쓰기 시작하면 규칙 2에 따라 빈 GPU로 배치됩니다.
+10. **스팟 쪽은 믿지 않습니다**(사용자 결정: 사용자는 믿어도 그 사용자의 AI 에이전트는 믿지 못함).
+    - 감시기는 세션마다 **받은 GPU**를 기억합니다(처음은 플러그인이 넣은 `LABGPU_SPOT_GPU`, 옮기거나 되살리면 그 GPU).
+      스팟 프로세스가 그 밖의 GPU(주인 GPU든 빈 GPU든)에서 보이면, 유예 없이 그 프로세스들만 곧바로 멈춰 두고
+      **자동으로 되살리지 않습니다**(`held`, 현황 파일과 `labgpu-spot status`에 표시). 강제 종료는 하지 않습니다.
+    - 컨테이너 안의 제한(HAMi-core, 환경변수, `sitecustomize`)은 보안 경계가 아닙니다. 컨테이너 안 프로그램이
+      `CUDA_VISIBLE_DEVICES`를 바꾸면 다른 GPU가 HAMi-core의 index 0이 되어 큰 제한을 받고(2026-09-27 Primary 실측:
+      빌리지 않은 GPU에 10GB 할당 성공), 공유 제한 파일도 세션 사용자 소유라 고칠 수 있습니다. 믿을 수 있는 경계는
+      컨테이너에 붙은 장치와 호스트의 감시기뿐입니다.
+    - 감시 주기(`poll_interval`) 사이에 잠깐 떴다 사라지는 프로세스는 잡지 못합니다.
 
 프로그램 쪽 권장: `torch.OutOfMemoryError`를 잡았을 때 `/tmp/labgpu-spot-evicted`가 있으면 GPU를 회수당한
 것이므로 체크포인트를 저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
@@ -566,6 +575,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt` | 확인 (2026-09-27, Primary, `1398dbf`). 이때는 유예 뒤 SIGKILL도 했으나, 사용자 결정으로 강제 종료를 없앰(규칙 5). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt`가 나지 않음. 강제 종료 없는 새 방식은 UNVERIFIED |
 | 이동 뒤 문제(`903285a`): 새로 띄운 프로세스와 `nvidia-smi`가 처음 GPU 순서를 봐서, 주인에게 돌아간 원래 GPU가 `cuda:0`이면서 빌려줄 수 있는 메모리(약 95GB)만큼 열려 있었음. HAMi-core `Limit inconsistency` ERROR. 규칙 6과 GPU 하나만 보이게 한 변경으로 고침 | 수정 확인 (2026-09-27 19:06~19:12, Primary, `8a88d1f`): 새 세션 `device_count()=1`, `cuda:0`=고른 GPU. 이동(빈틈 3.25초) 뒤 새 `bash -lc`, `bash -c`, 셸 없는 `docker exec` python 모두 옮겨 간 GPU 하나만 봄. `Limit inconsistency` 사라짐. 통합 테스트 80개 통과 |
 | 처리기가 있는 프로세스와 없는 프로세스가 섞이면 세션 전체를 오류 없이 멈춰 두던 것(`903285a`, 사용자 방침과 다름)을 프로세스마다로 고침 | 수정 확인 (2026-09-27, Primary, `8a88d1f`): `python -S` 쪽 즉시 멈춤, 처리기 쪽은 OOM을 받고 정확히 60초 뒤 멈춤, 주인이 비우자 6초 뒤 둘이 함께 되살아남. 이때 OOM이 멈춰 두기 뒤에 가서 약 2.5초 늦었고, 신호를 먼저 보내도록 순서를 바꿈(UNVERIFIED) |
+| 보안: 스팟 세션 안에서 `CUDA_VISIBLE_DEVICES`를 바꾸면(`B,A` 또는 `B`) 빌리지 않은 GPU B에 10GB 할당 성공, 감시기도 반응 없음(`8a88d1f`, B에 스팟이 있는 것을 허용하던 규칙). 규칙 10으로 고침 | 문제 확인 (2026-09-27 19:25, Primary). 수정본 UNVERIFIED |
 | 감시기가 옮긴 뒤 새로 띄운 CUDA 프로세스마다 HAMi-core `host pid is error!`, `SET_TASK_PID FAILED - using container PID for accounting`. 이동 전에는 없음. `nvidia-smi` 표시처럼 HAMi-core가 CUDA index와 NVML(PCI) index를 같다고 보는 탓으로 추정. 사용량 기록이 컨테이너 PID 기준이 되어 제한 정확도에 영향이 있는지는 미확인 | 확인 (2026-09-27, Primary). 원인·영향 UNVERIFIED |
 | root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |

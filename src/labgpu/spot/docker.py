@@ -34,6 +34,7 @@ class SpotContainer:
     id: str
     pid: int
     uuids: tuple[str, ...]  # every GPU attached to it: where it may run or be moved to
+    gpu: str = ""  # the GPU the spot plugin gave it (LABGPU_SPOT_GPU at creation)
 
 
 def _env(inspect: Mapping[str, Any]) -> dict[str, str]:
@@ -83,6 +84,7 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         id=inspect["Id"],
         pid=int((inspect.get("State") or {}).get("Pid") or 0),
         uuids=tuple(u for u in env.get(ENV_SPOT_UUIDS, "").split(",") if u),
+        gpu=env.get("LABGPU_SPOT_GPU", ""),
     )
 
 

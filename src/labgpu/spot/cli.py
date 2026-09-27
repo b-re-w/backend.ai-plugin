@@ -47,6 +47,8 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         )
     for p in status.get("parked", []):
         print(f"parked {p['container']} from {p['from']} for {time.time() - p['since']:.0f}s")
+    for h in status.get("held", []):
+        print(f"held {h['container']} pids {h['pids']}: caught on {h['from']}, a GPU it was not given")
     for cid, op in status.get("busy", {}).items():
         print(f"in progress: {op} {cid}")
     if not status.get("can_move", True):

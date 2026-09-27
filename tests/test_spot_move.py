@@ -120,7 +120,7 @@ def test_split_sessions_and_spot_classification():
     owner = {"Id": "o" * 64, "State": {"Pid": 8}, "Config": {"Env": ["LABGPU_DEVICE_UUIDS=GPU-a"]}}
     owners, spots = split_sessions([spot, owner])
     assert [o.id for o in owners] == ["o" * 64]
-    assert spots == [SpotContainer("s" * 64, 9, ("GPU-a", "GPU-b"))]
+    assert spots == [SpotContainer("s" * 64, 9, ("GPU-a", "GPU-b"))]  # no LABGPU_SPOT_GPU: gpu ""
 
     gpus = [GpuInfo(0, "GPU-a", P6K, 96 * GiB, "0:1"), GpuInfo(1, "GPU-c", P6K, 96 * GiB, "0:2")]
     snaps = {
@@ -213,7 +213,7 @@ class Inline:
 def make_controller(tmp_path: Path, procs, handler=True):
     gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
     owner = OwnerContainer("o" * 64, 0, ("GPU-0",))
-    spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"))
+    spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0")
     cfg = Config(
         controller=ControllerConfig(state_dir=tmp_path),
         idle=IdleConfig(idle_minutes=1, owner_cpu_threshold=0),
@@ -498,3 +498,38 @@ def test_failed_park_still_sends_the_oom_error(tmp_path):
     c.tick(80)
     assert ck.calls == [("oom", (20,), ("GPU-0", "GPU-1", "GPU-2")), ("park-failed", (21,))]
     assert c.oomed[SPOT] == 80 and SPOT not in c.parked
+
+
+def test_process_on_a_gpu_it_was_not_given_is_held_off_it(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)]}
+    c, fake, ck = make_controller(tmp_path, procs)  # the session was given GPU-0
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 20 * GiB, 90, SPOT))  # its training on GPU-0: fine
+    procs[1] = [(30, 10 * GiB, 90, SPOT)]  # CUDA_VISIBLE_DEVICES changed: 10 GiB on GPU-1
+    c.tick(80)
+    assert ck.calls == [("park", (30,))]  # right away, no grace, the rest untouched
+    procs[1] = []
+    c.tick(85)
+    assert c.held[SPOT].pids == (30,) and SPOT not in c.parked
+    for t in (90, 400):
+        c.tick(t)
+    assert not any(call[0] == "restore" for call in ck.calls)  # never restored automatically
+
+
+def test_moves_update_the_assigned_gpu(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    for t in (0, 30, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(80)
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(90)
+    dst = ck.calls[0][3]
+    procs[0].pop()
+    procs[int(dst[-1])] = [(20, 30 * GiB, 90, SPOT)]
+    c.tick(95)
+    assert c.assigned[SPOT] == dst and not any(call[0] == "park" for call in ck.calls)
