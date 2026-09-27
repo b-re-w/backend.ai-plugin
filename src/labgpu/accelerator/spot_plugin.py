@@ -259,10 +259,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         """The GPU for a new spot session with `share` and its memory cap in bytes (SPEC 2.12)."""
         now = time.time()
         handed = [h for h in (self._handed_out or []) if now - h[1] < RESERVE_SECONDS]
-        taken: dict[str, float] = {}
-        for uuid, _t, sh in handed:
-            taken[uuid] = taken.get(uuid, 0.0) + sh
         status = spotstatus.read_status(self.spot_status_path, now, self.spot_status_max_age)
+        taken = spotstatus.unreported(handed, status)
         uuids = [g.uuid for g in self._gpus or []]
         picked = spotstatus.pick_spot_gpu(uuids, status, share, taken)
         if picked is not None:

@@ -27,6 +27,7 @@ class GpuLending:
     lendable_memory: int = 0  # bytes a spot session may use on this GPU right now
     spot_share: float = 0.0  # total share of the spot sessions on it (0..1)
     spot_capacity: int = 0  # bytes all spot sessions on it may use together (SPEC 2.9.1)
+    spots: tuple[tuple[float, float], ...] = ()  # (share, first seen) of each spot session on it
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,10 @@ def parse_status(text: str, now: float, max_age: float = DEFAULT_MAX_AGE) -> dic
             lendable_memory=int(g.get("lendable_memory") or 0),
             spot_share=float(g.get("spot_share") or (1.0 if g.get("lent_job") else 0.0)),
             spot_capacity=int(g.get("spot_capacity") or g.get("lendable_memory") or 0),
+            spots=tuple(
+                (float(sp.get("share") or 1.0), float(sp.get("seen") or 0.0))
+                for sp in g.get("spots") or () if isinstance(sp, dict)
+            ),
         )
     return result
 
@@ -90,6 +95,28 @@ def session_lending(
         starts = [g.since for g in lent if g.since]
         result[cid] = SessionLending(lent=len(lent), total=len(mine), since=min(starts) if starts else 0.0)
     return result
+
+
+def unreported(
+    handed: Iterable[tuple[str, float, float]], status: Mapping[str, GpuLending] | None
+) -> dict[str, float]:
+    """
+    Shares this plugin handed out (uuid, time, share) that the status file does not list yet, per
+    GPU. A listed spot on the same GPU with the same share, first seen after the hand-out, accounts
+    for it (one to one), so no share is counted twice (SPEC 2.12).
+    """
+    listed = {u: list(g.spots) for u, g in (status or {}).items()}
+    taken: dict[str, float] = {}
+    for uuid, t, share in sorted(handed, key=lambda h: h[1]):
+        match = next(
+            (i for i, (sh, seen) in enumerate(listed.get(uuid, [])) if abs(sh - share) < 1e-6 and seen >= t),
+            None,
+        )
+        if match is not None:
+            del listed[uuid][match]
+        else:
+            taken[uuid] = taken.get(uuid, 0.0) + share
+    return taken
 
 
 def spot_capacity(own_uuids: Collection[str], status: Mapping[str, GpuLending] | None) -> int:

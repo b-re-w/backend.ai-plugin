@@ -342,7 +342,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
  "gpus": [{"uuid": "GPU-...", "state": "LENT", "lendable": false, "must_reclaim": false,
            "reasons": [], "lendable_memory": 0, "idle_for": 7800.0, "model": "NVIDIA RTX PRO 6000 ...",
            "lent_job": "3f2a9c1b7d4e", "lent_since": 1789992200.0,
-           "spots": [{"container": "3f2a9c1b7d4e", "share": 0.5}], "spot_share": 0.5,
+           "spots": [{"container": "3f2a9c1b7d4e", "share": 0.5, "seen": 1789992190.0}], "spot_share": 0.5,
            "spot_capacity": 99807657984}],
  "parked": [{"container": "8f77fe432325", "from": "GPU-...", "since": 1790000000.0}],
  "busy": {"8f77fe432325": "Move"}}
@@ -351,7 +351,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 - `lent_job`: 그 GPU 위 첫 스팟 세션 컨테이너 ID 앞 12자리, 없으면 `null`. `lent_since`: 그 GPU에서 스팟을
   처음 본 시각.
 - `spots`: 그 GPU 위 스팟 세션 전부와 각자의 몫. 아직 GPU 프로세스가 없는 스팟은 배정받은 GPU(`LABGPU_SPOT_GPU`,
-  옮겨졌으면 옮겨 간 GPU)에 `"idle": true`로 들어갑니다(규칙 1-1). `spot_share`: 몫의 합(0~1). `spot_capacity`: 스팟 전체가 쓸 수 있는
+  옮겨졌으면 옮겨 간 GPU)에 `"idle": true`로 들어갑니다(규칙 1-1). `seen`은 감시기가 그 컨테이너를 처음 본 시각. `spot_share`: 몫의 합(0~1). `spot_capacity`: 스팟 전체가 쓸 수 있는
   메모리(전체 - 스팟을 뺀 사용량 - `mem_reserve_mib`, 바이트). 스팟 플러그인이 새 세션의 GPU와 메모리 상한을 정할 때 씁니다.
 - `spot_enabled`가 `false`면 스팟 플러그인은 자리를 0으로 봅니다. `can_move`는 cuda-checkpoint를 쓸 수 있는지.
 
@@ -391,8 +391,10 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
     WARNING을 남깁니다. 감시기가 자리가 나는 대로 옮기며, 그 전에는 요청보다 적은 메모리로 돕니다.
 - **GPU 고르기와 메모리 제한.** 새 스팟 세션이 쓸 GPU는 플러그인이 고릅니다. 현황 파일에서 LENDABLE이거나
   회수 조건 없이 LENT인 GPU 가운데, 남은 몫(1 - 이미 올라간 스팟 몫의 합 - 최근 120초 안에 이 플러그인이 새 세션에
-  준 몫)이 `s` 이상인 것 중 **남는 몫이 가장 적어지는 것**(같으면 스팟 용량이 큰 것)입니다. 한 GPU를 먼저 채워
+  준 몫 가운데 감시기가 아직 현황 파일에 올리지 않은 것)이 `s` 이상인 것 중 **남는 몫이 가장 적어지는 것**(같으면 스팟 용량이 큰 것)입니다. 한 GPU를 먼저 채워
   다른 GPU는 통째로 남기려는 것입니다.
+  - 감시기는 빈 스팟도 바로 올리므로(규칙 1-1), 내준 몫을 두 번 세지 않도록 같은 GPU에 같은 몫으로 `seen`이 내준
+    시각 이후인 스팟이 현황 파일에 있으면 그 몫은 하나씩 짝지어 뺍니다.
   - 스팟 용량(`spot_capacity`)은 그 GPU에서 스팟 전체가 쓸 수 있는 메모리입니다: 전체 - 스팟을 뺀 사용량 -
     `mem_reserve_mib`(감시기가 매 틱 계산해 현황 파일에 씀).
   - 프로그램에는 **그 GPU 하나만** 보이게 합니다(`CUDA_VISIBLE_DEVICES=<고른 GPU>`, 프로그램의 `cuda:0`). HAMi-core로

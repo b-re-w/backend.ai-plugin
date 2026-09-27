@@ -94,6 +94,7 @@ class Controller:
         self.last_verdicts: dict[str, GpuVerdict] = {}
         self.last_obs: dict[str, GpuObservation] = {}
         self.spot_seen: dict[tuple[str, str], float] = {}  # (container, gpu) -> first seen
+        self.first_seen: dict[str, float] = {}  # spot container -> when the monitor first listed it
         self.spot_info: dict[str, SpotContainer] = {}
         self.parked: dict[str, ParkedRecord] = {}
         self.busy: dict[str, str] = {}  # container -> operation in flight
@@ -153,6 +154,10 @@ class Controller:
             log.error("docker unavailable, treating all GPUs as unknown: %s", e)
             owners, spots, docker_ok = [], [], False
         self.spot_info = {s.id: s for s in spots}
+        for s in spots:
+            self.first_seen.setdefault(s.id, now)
+        for cid in [c for c in self.first_seen if c not in self.spot_info]:
+            del self.first_seen[cid]
         for s in spots:
             if s.gpu:
                 self.assigned.setdefault(s.id, s.gpu)
@@ -559,8 +564,9 @@ class Controller:
                 "state": str(v.state),
                 "lent_job": spots[0][:12] if spots else None,
                 "lent_since": since,
-                "spots": [{"container": c[:12], "share": self._share(c)} for c in spots]
-                + [{"container": c[:12], "share": self._share(c), "idle": True} for c in idle.get(v.uuid, [])],
+                "spots": [{"container": c[:12], "share": self._share(c), "seen": self.first_seen.get(c)} for c in spots]
+                + [{"container": c[:12], "share": self._share(c), "seen": self.first_seen.get(c), "idle": True}
+                   for c in idle.get(v.uuid, [])],
                 "spot_share": round(min(sum(self._share(c) for c in [*spots, *idle.get(v.uuid, [])]), 1.0), 4),
             })
         status = {

@@ -10,7 +10,7 @@ from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
 from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Resize, Restore, RunningSpot, plan
-from labgpu.spotstatus import parse_status, pick_spot_gpu, roomiest_spot_gpu, spot_capacity
+from labgpu.spotstatus import GpuLending, parse_status, pick_spot_gpu, roomiest_spot_gpu, spot_capacity, unreported
 
 P6K = "NVIDIA RTX PRO 6000"
 A6K = "NVIDIA RTX A6000"
@@ -750,6 +750,30 @@ def test_status_counts_a_spot_with_no_gpu_process_on_its_gpu(tmp_path):
     c.tick(0)
     c.write_status(tmp_path / "status.json", 0)
     gpus = {g["uuid"]: g for g in json.loads((tmp_path / "status.json").read_text())["gpus"]}
-    assert gpus["GPU-0"]["spots"] == [{"container": "s" * 12, "share": 1.0, "idle": True}]
+    assert gpus["GPU-0"]["spots"] == [{"container": "s" * 12, "share": 1.0, "seen": 0, "idle": True}]
     assert gpus["GPU-0"]["spot_share"] == 1.0 and gpus["GPU-1"]["spot_share"] == 0
     assert parse_status((tmp_path / "status.json").read_text(), 0)["GPU-0"].spot_share == 1.0
+
+
+def test_a_handed_share_the_monitor_lists_is_not_counted_twice():
+    status = {
+        "A": GpuLending(False, None, "LENDABLE", spot_share=0.5, spot_capacity=40 * GiB, spots=((0.5, 105.0),)),
+        "B": GpuLending(False, None, "LENDABLE", spot_capacity=40 * GiB),
+    }
+    # Handed out at 100, listed at 105: counted once, so a second 0.5 still goes to A.
+    assert unreported([("A", 100.0, 0.5)], status) == {}
+    assert pick_spot_gpu(["A", "B"], status, 0.5, unreported([("A", 100.0, 0.5)], status))[0] == "A"
+    # Not listed yet (or an older spot was listed before the hand-out): still taken.
+    assert unreported([("A", 110.0, 0.5)], status) == {"A": 0.5}
+    assert unreported([("B", 100.0, 0.5)], status) == {"B": 0.5}
+    # One listed spot accounts for one hand-out only.
+    assert unreported([("A", 100.0, 0.5), ("A", 101.0, 0.5)], status) == {"A": 0.5}
+
+
+def test_status_lists_when_each_spot_was_first_seen(tmp_path):
+    c, fake, ck = make_controller(tmp_path, {0: [(10, 4 * GiB, 0, "o" * 64)]})
+    c.tick(7)
+    c.tick(9)
+    c.write_status(tmp_path / "status.json", 9)
+    st = parse_status((tmp_path / "status.json").read_text(), 9)
+    assert st["GPU-0"].spots == ((1.0, 7.0),)
