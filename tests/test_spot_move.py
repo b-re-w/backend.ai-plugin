@@ -342,3 +342,39 @@ def test_cli_status_accepts_state_dir_after_the_command(tmp_path, capsys):
     (tmp_path / "status.json").write_text(json.dumps({"updated_at": 0, "gpus": []}))
     assert main(["status", "--state-dir", str(tmp_path)]) == 0
     assert main(["--state-dir", str(tmp_path), "status"]) == 0
+
+
+def test_interrupt_signals_as_owner_and_never_kills(monkeypatch):
+    import signal as sg
+
+    from labgpu.spot import ckpt
+
+    monkeypatch.setattr(ckpt, "_exists", lambda pid: True)
+    calls = []
+    ckpt.interrupt("c1", [4242], sig=sg.SIGINT, reason="no free GPU",
+                   run=lambda cid, *argv, user: calls.append((user, argv)) or "",
+                   identify=lambda p: ckpt.ProcIdentity(17, "1100:1200"))
+    [(user, argv)] = calls
+    assert user == "1100:1200" and "kill -s INT 17" in argv[2] and ckpt.EVICT_MARKER in argv[2]
+    assert "KILL" not in argv[2]
+
+
+def test_parked_spot_without_room_stays_parked(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    procs[0].pop()
+    c.tick(85)
+    assert SPOT in c.parked
+    # Every GPU stays busy and full: after park_seconds nothing is killed, it stays parked.
+    for g in fake.gpus:
+        object.__setattr__(g, "total_memory", 5 * GiB)
+    c.tick(150)
+    c.tick(155)
+    assert SPOT in c.parked and c.parked[SPOT].spot.since >= 150
+    assert not any(call[0] == "restore" for call in ck.calls)

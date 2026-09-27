@@ -60,8 +60,8 @@ class SpotConfig:
     cuda_checkpoint: Path = field(default_factory=default_cuda_checkpoint)
     checkpoint_timeout_seconds: float = 60.0
     park_seconds: float = 300.0
-    evict_signal: str = "SIGINT"
-    evict_grace_seconds: float = 30.0
+    evict_signal: str = "SIGINT"  # the error raised in the program when it cannot stay (never killed)
+    interrupt_interval_seconds: float = 30.0  # no second signal to the same session sooner than this
 
 
 @dataclass(frozen=True)

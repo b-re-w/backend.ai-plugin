@@ -20,6 +20,6 @@ mem_reserve_mib = 2048
 [spot]
 enabled = true
 # cuda_checkpoint = "/path/to/cuda-checkpoint"  # default: <plugin checkout>/.venv/bin (scripts/install_cuda_checkpoint.sh)
-park_seconds = 300          # wait this long off the GPU for a free one before evicting
-evict_signal = "SIGINT"     # KeyboardInterrupt in Python
-evict_grace_seconds = 30
+park_seconds = 300          # wait this long off the GPU for a free one before raising the error
+evict_signal = "SIGINT"     # the error raised in the program: KeyboardInterrupt in Python (never killed)
+interrupt_interval_seconds = 30   # at most one signal per session this often

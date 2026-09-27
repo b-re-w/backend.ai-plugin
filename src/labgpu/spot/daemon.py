@@ -14,12 +14,12 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
-from .ckpt import CheckpointError, CudaCheckpoint, evict
+from .ckpt import CheckpointError, CudaCheckpoint, interrupt
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
@@ -83,6 +83,7 @@ class Controller:
         self.spot_info: dict[str, SpotContainer] = {}
         self.parked: dict[str, ParkedRecord] = {}
         self.busy: dict[str, str] = {}  # container -> operation in flight
+        self.interrupted: dict[str, float] = {}  # container -> when its program was last signalled
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
@@ -263,40 +264,47 @@ class Controller:
                 job = lambda: ck.restore(cid, record.pids, src, dst, record.spot.allowed)  # noqa: E731
                 fallback = None
             case Evict(_, gpu, reason):
-                log.warning("spot %s: evict (%s)", cid[:12], reason)
                 if cid in self.parked:
+                    log.warning("spot %s: evict (%s)", cid[:12], reason)
                     job = self._evict_parked_job(self.parked[cid], reason)
                 else:
+                    last = self.interrupted.get(cid)
+                    if last is not None and now - last < self.cfg.spot.interrupt_interval_seconds:
+                        return  # already told; give the program time to react
+                    log.warning("spot %s: evict (%s)", cid[:12], reason)
+                    self.interrupted[cid] = now
                     job = self._evict_job(cid, self._pids_on(cid, gpu), reason)
                 fallback = None
         self._submit(action, job, fallback, None)
 
     def _evict_job(self, cid: str, pids: tuple[int, ...], reason: str) -> Callable[[], None]:
-        spot = self.cfg.spot
-        sig = signal.Signals[spot.evict_signal]
-        return lambda: evict(cid, pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
+        """Raise the error in the program (SPEC 2.12). Nothing is ever killed."""
+        sig = signal.Signals[self.cfg.spot.evict_signal]
+        return lambda: interrupt(cid, pids, sig=sig, reason=reason)
 
     def _evict_parked_job(self, record: ParkedRecord, reason: str) -> Callable[[], None]:
-        """Bring it back on a GPU with room so the program can react to the signal, else kill it."""
+        """
+        A parked program can only see the error once it runs again, so bring it back on a GPU of
+        its model with room for it, then raise the error. With no such GPU it stays parked (off
+        every GPU) and this is tried again after another park_seconds.
+        """
         need = record.memory + self.cfg.reclaim.mem_reserve
         src_model = self.last_obs[record.spot.src].model if record.spot.src in self.last_obs else None
         rooms = [
             o for u, o in self.last_obs.items()
             if u in record.spot.allowed and o.ok and o.model == src_model and o.free_memory >= need
         ]
-        spot = self.cfg.spot
         ck = self.checkpointer
-        sig = signal.Signals[spot.evict_signal]
+        sig = signal.Signals[self.cfg.spot.evict_signal]
+        cid = record.spot.container_id
 
         def job() -> None:
-            if rooms and ck is not None:
-                dst = max(rooms, key=lambda o: o.free_memory).uuid
-                cid = record.spot.container_id
-                ck.restore(cid, record.pids, record.spot.src, dst, record.spot.allowed)
-                evict(cid, record.pids, sig=sig, grace=spot.evict_grace_seconds, reason=reason)
-            else:
-                log.warning("spot %s: no GPU has room to resume it; killing", record.spot.container_id[:12])
-                evict(record.spot.container_id, record.pids, sig=signal.SIGKILL, grace=0, reason=reason)
+            if not rooms or ck is None:
+                raise CheckpointError("no GPU has room to resume it; it stays parked")
+            dst = max(rooms, key=lambda o: o.free_memory).uuid
+            ck.restore(cid, record.pids, record.spot.src, dst, record.spot.allowed)
+            self.interrupted[cid] = time.time()
+            interrupt(cid, record.pids, sig=sig, reason=reason)
 
         return job
 
@@ -318,7 +326,8 @@ class Controller:
                 ok = False
                 log.error("spot %s: %s failed: %s", cid[:12], type(action).__name__, e)
                 if fallback is not None:
-                    log.warning("spot %s: evicting instead", cid[:12])
+                    log.warning("spot %s: raising the error in the program instead", cid[:12])
+                    self.interrupted[cid] = time.time()
                     try:
                         fallback()
                     except OSError as e2:
@@ -341,8 +350,13 @@ class Controller:
             if isinstance(action, Park) and ok and record is not None:
                 self.parked[cid] = record
                 changed = True
+            elif isinstance(action, Evict) and cid in self.parked and not ok:
+                # Stayed parked: wait another park_seconds before trying again.
+                old = self.parked[cid]
+                self.parked[cid] = replace(old, spot=replace(old.spot, since=time.time()))
+                changed = True
             elif isinstance(action, (Restore, Evict)) and cid in self.parked:
-                if ok or isinstance(action, Evict):
+                if ok:
                     del self.parked[cid]
                     changed = True
         if changed:

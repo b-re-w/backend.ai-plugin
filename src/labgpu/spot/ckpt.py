@@ -152,43 +152,29 @@ class CudaCheckpoint:
             log.error("rollback failed: %s", e)
 
 
-def evict(
+def interrupt(
     cid: str,
     pids: Sequence[int],
     *,
     sig: signal.Signals,
-    grace: float,
     reason: str,
     run: Callable[..., str] | None = None,
     identify: Callable[[int], ProcIdentity] = identify,
-    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """
-    Leave a marker file in the container, send `sig` (SIGINT raises KeyboardInterrupt in Python),
-    wait up to `grace` seconds, then SIGKILL what is left. The session itself keeps running.
+    Raise an error in the spot program (SPEC 2.12): leave a marker file, then send `sig`
+    (SIGINT: KeyboardInterrupt in Python). Never kills; the program decides how to end.
     Runs as the processes' owner, so the program can read and remove the marker.
     """
     run = run or DockerExec()
     who = {p: identify(p) for p in pids if _exists(p)}
     if not who:
         return
-    inner = {p: w.pid for p, w in who.items()}
     owner = next(iter(who.values())).user
     name = sig.name.removeprefix("SIG")
-    targets = " ".join(str(p) for p in inner.values())
-    script = 'printf "%s\\n" "$1" > ' + EVICT_MARKER + f"; kill -s {name} {targets}"
+    targets = " ".join(str(w.pid) for w in who.values())
+    script = 'printf "%s\n" "$1" > ' + EVICT_MARKER + f"; kill -s {name} {targets}"
     run(cid, "sh", "-c", script, "sh", reason, user=owner)
-    left = grace
-    alive = list(inner)
-    while alive and left > 0:
-        sleep(1.0)
-        left -= 1.0
-        alive = [p for p in alive if _exists(p)]
-    if alive:
-        try:
-            run(cid, "kill", "-s", "KILL", *(str(inner[p]) for p in alive), user=owner)
-        except CheckpointError as e:
-            log.error("SIGKILL in %s failed: %s", cid[:12], e)
 
 
 def _exists(pid: int) -> bool:

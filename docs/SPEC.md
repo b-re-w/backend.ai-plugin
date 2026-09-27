@@ -267,8 +267,8 @@ cuda_checkpoint = "..."      # 기본: <플러그인 체크아웃>/.venv/bin/cud
                              # (scripts/install_cuda_checkpoint.sh가 root 없이 거기에 설치)
 checkpoint_timeout_seconds = 60
 park_seconds = 300           # 옮길 GPU가 없을 때 멈춰 두고 기다리는 시간
-evict_signal = "SIGINT"      # 내보낼 때 보내는 시그널 (파이썬에서는 KeyboardInterrupt)
-evict_grace_seconds = 30     # 시그널 뒤 SIGKILL까지
+evict_signal = "SIGINT"      # 내보낼 때 프로그램에 내는 오류 (파이썬에서는 KeyboardInterrupt). 강제 종료는 없음
+interrupt_interval_seconds = 30   # 같은 세션에 시그널을 다시 보내기까지 최소 간격
 ```
 
 ### 2.3 관측 (매 틱)
@@ -415,15 +415,20 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 4. **멈춰 두기(Park)**: 옮길 GPU가 없으면 lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는
    CUDA 호출에서 기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore).
    멈춰 둔 스팟은 새로 옮겨야 하는 스팟보다 먼저 자리를 받습니다.
-5. **내보내기(Evict)**: 멈춰 둔 지 `park_seconds`가 지나면 내보냅니다.
-   - 같은 모델 GPU 중 (그 스팟이 쓰던 메모리 + `mem_reserve_mib`)만큼 비어 있는 곳이 있으면 거기로 되살린 뒤,
-     컨테이너 안에 `/tmp/labgpu-spot-evicted`(사유 한 줄)를 남기고 `evict_signal`(기본 SIGINT, 파이썬에서는
-     `KeyboardInterrupt`)을 보냅니다. `evict_grace_seconds` 안에 끝나지 않으면 SIGKILL.
-   - 그런 GPU가 없으면 바로 SIGKILL합니다(파이썬 예외 없음).
+5. **내보내기(Evict): 프로그램에 파이썬 오류를 냅니다. 프로세스를 강제로 죽이지 않습니다**(사용자 결정).
+   멈춰 둔 지 `park_seconds`가 지나면:
+   - 멈춰 둔 프로그램은 다시 돌아야 오류를 받을 수 있으므로, 같은 모델 GPU 중 (그 스팟이 쓰던 메모리 +
+     `mem_reserve_mib`)만큼 비어 있는 곳에 되살린 뒤, 컨테이너 안에 `/tmp/labgpu-spot-evicted`(사유 한 줄)를
+     남기고 `evict_signal`(기본 SIGINT, 파이썬에서는 `KeyboardInterrupt`)을 보냅니다.
+   - 그런 GPU가 없으면 오류를 보내지 않고 그대로 멈춰 두며, `park_seconds` 뒤 다시 시도합니다.
+   - 오류를 받고도 프로그램이 계속 돌면 규칙 2~4에 따라 다시 옮기거나 멈춰 둡니다. 같은 세션에는
+     `interrupt_interval_seconds`보다 자주 시그널을 보내지 않습니다.
    - 세션 자체는 끝내지 않습니다. 다시 GPU를 쓰기 시작하면 규칙 2에 따라 빈 GPU로 배치됩니다.
 6. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기는 대신 GPU 위에서
-   바로 내보냅니다(5와 같은 시그널 순서). 이동이나 멈춰 두기가 실패해도 내보냅니다.
-7. GPU를 둘 이상 쓰는 스팟 세션은 내보냅니다.
+   바로 오류를 냅니다(5의 시그널). 이동이나 멈춰 두기가 실패해도 오류를 냅니다. **이때 프로그램이 오류를 받고도
+   끝내지 않으면 주인 GPU를 계속 함께 씁니다**(강제 종료가 없으므로). cuda-checkpoint가 동작하는 노드에서는
+   멈춰 두기로 GPU를 비우므로 이 경우가 생기지 않습니다.
+7. GPU를 둘 이상 쓰는 스팟 세션에는 오류를 냅니다.
 
 프로그램 쪽 권장: `KeyboardInterrupt`를 받으면 `/tmp/labgpu-spot-evicted`가 있는지 보고, 있으면 체크포인트를
 저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
@@ -448,8 +453,8 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
     `/etc/ld.so.preload`에도 넣어서 `LD_PRELOAD`를 지워도 cuda-checkpoint에 HAMi-core가 올라옵니다. 이때
     HAMi-core가 세션 사용자 소유의 공유 파일(`/tmp/labgpu-vgpu.cache`)을 열어야 하는데 root로는 `EACCES`로
     실패합니다(2026-09-27 Primary에서 확인). 주인 계정은 자기 프로세스를 체크포인트하고 시그널을 보낼 수 있습니다.
-  - 내보내기: 같은 주인 계정으로 `sh -c`를 실행해 `/tmp/labgpu-spot-evicted`를 쓰고 `kill -s INT`, 유예 뒤
-    `kill -s KILL`. 표시 파일도 주인 소유라 프로그램이 읽고 지울 수 있습니다.
+  - 내보내기: 같은 주인 계정으로 `sh -c`를 실행해 `/tmp/labgpu-spot-evicted`를 쓰고 `kill -s INT`만 보냅니다.
+    표시 파일도 주인 소유라 프로그램이 읽고 지울 수 있습니다.
   - 관찰(NVML, `/proc/<pid>/cgroup`, `docker inspect`)은 일반 계정으로 됩니다.
   - 스팟 사용자도 그 도구를 실행할 수 있지만, 자기 컨테이너 안 프로세스에만 쓸 수 있습니다.
 - 상태 파일(`status.json`, `parked.json`)은 Backend.AI 관례대로 agent의 `[agent] var-base-path` 아래 `labgpu/`에
@@ -538,7 +543,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | root로 실행하면 실패: 컨테이너 `/etc/ld.so.preload`로 올라온 HAMi-core가 `/tmp/labgpu-vgpu.cache`를 열지 못함(`errno=13`), 이동 실패 뒤 내보내기로 넘어감 (2026-09-27, Primary, `1398dbf`). 주인 계정으로 실행하도록 고친 뒤는 UNVERIFIED |
 | 스팟 세션(`cuda-pro6000-spot.device` 1): 환경변수(`LABGPU_SPOT_GPU`, 고른 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_0=95184m`, `_1=1m`), HAMi-core 로드, 컨테이너 안 `/opt/labgpu/cuda-checkpoint`. torch 2.11(cu128): `cuda:0`이 고른 PRO 6000, 8GB 할당 성공, `cuda:1`에 100MB는 `OutOfMemoryError`(총 1024KiB). 컨테이너 안 `nvidia-smi`는 95184MiB / 1MiB. 학습을 돌리면 그 GPU가 LENT | 확인 (2026-09-27, Primary, `1398dbf`) |
 | 주인 세션이 같은 GPU를 받으면 감시기가 5초 안에 이동 시작(`new owner containers`) | 감지 확인 (2026-09-27, Primary). 이동 자체는 위 행의 권한 문제로 실패 |
-| 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt`, 유예 뒤 SIGKILL | 확인 (2026-09-27, Primary). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt` 없이 유예 뒤 SIGKILL로 끝남 |
+| 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt` | 확인 (2026-09-27, Primary, `1398dbf`). 이때는 유예 뒤 SIGKILL도 했으나, 사용자 결정으로 강제 종료를 없앰(규칙 5). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt`가 나지 않음. 강제 종료 없는 새 방식은 UNVERIFIED |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문
