@@ -43,6 +43,28 @@ def _install():
         pass  # not the main thread or an invalid signal: leave the program alone
 
 
+_ENV_FILE = "/tmp/labgpu-spot-env"
+_ENV_KEYS = ("CUDA_VISIBLE_DEVICES", "LABGPU_SPOT_GPU")
+
+
+def _follow_moves():
+    """
+    After the monitor moved this session to another GPU, the container's own environment still
+    names the first GPU as cuda:0, and that GPU may be its owner's again. The monitor writes the
+    order and limits in force to _ENV_FILE; a program started now takes them before CUDA starts,
+    so its cuda:0 is the GPU the session really has and every other GPU stays at 1 MiB.
+    """
+    try:
+        with open(_ENV_FILE) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and (key in _ENV_KEYS or key.startswith("CUDA_DEVICE_MEMORY_LIMIT_")):
+            os.environ[key] = value
+
+
 def _chain():
     """Import the next sitecustomize on sys.path, the one this file shadows."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -60,5 +82,6 @@ def _chain():
         print(f"labgpu: the image's sitecustomize failed: {e!r}", file=sys.stderr)
 
 
+_follow_moves()
 _install()
 _chain()

@@ -20,4 +20,4 @@ mem_reserve_mib = 2048
 [spot]
 enabled = true
 # cuda_checkpoint = "/path/to/cuda-checkpoint"  # default: <plugin checkout>/.venv/bin (scripts/install_cuda_checkpoint.sh)
-oom_grace_seconds = 10      # after the out-of-memory error, park a program still on the GPU this long
+oom_grace_seconds = 60      # after the out-of-memory error, park a program still on the GPU this long

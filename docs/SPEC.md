@@ -266,7 +266,7 @@ enabled = true               # false면 스팟 자리를 0으로 보고하고, �
 cuda_checkpoint = "..."      # 기본: <플러그인 체크아웃>/.venv/bin/cuda-checkpoint, 없으면 PATH
                              # (scripts/install_cuda_checkpoint.sh가 root 없이 거기에 설치)
 checkpoint_timeout_seconds = 60
-oom_grace_seconds = 10       # OOM 오류 뒤에도 주인 GPU에 남아 있으면 이만큼 뒤 멈춰 둠
+oom_grace_seconds = 60       # OOM 오류 뒤에도 주인 GPU에 남아 있으면 이만큼 뒤 멈춰 둠 (저장할 시간)
 ```
 
 ### 2.3 관측 (매 틱)
@@ -413,12 +413,15 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 4. **옮길 GPU가 없을 때: 즉시 OOM 오류, 강제 종료 없음**(사용자 결정). `KeyboardInterrupt`(SIGINT)와 KILL은
    쓰지 않습니다. "다음 할당에서 오류가 나기를" 기다리는 방식도 쓰지 않습니다(안정 상태의 학습은 새 할당을
    하지 않아 오류가 늦거나 안 나고, 그동안 주인이 OOM으로 죽을 수 있음).
+   - **프로세스마다** 따로 판단합니다. 처리기가 없는 프로세스는 바로 멈춰 두고(5), 처리기가 있는 프로세스는
+     아래처럼 OOM 오류를 받습니다. 한 세션에 둘이 섞여 있어도 처리기가 있는 프로세스는 저장할 기회를 잃지 않습니다.
    - 프로그램이 OOM 신호(`SIGRTMIN+10` = 44) 처리기를 걸어 두었으면(`/proc/<pid>/status`의 `SigCgt` 비트 43):
      컨테이너 안에서 세션 사용자로 HAMi-core 제한을 붙은 GPU 모두 1MiB로 낮추고(`set_current_device_memory_limit`,
      이후 할당도 실패), `/tmp/labgpu-spot-evicted`에 사유를 쓰고, 신호를 보냅니다. 처리기가 메인 스레드에서 즉시
      `torch.OutOfMemoryError`를 냅니다(실측 0.46초). `oom_grace_seconds` 뒤에도 그 GPU에 남아 있으면(오류를 잡고
-     계속 도는 경우) 5로 멈춰 둡니다. 주인의 GPU를 붙잡고 있는 상태가 남지 않게 하려는 것입니다.
+     계속 도는 경우) 5로 멈춰 둡니다. 주인의 GPU를 붙잡고 있는 상태가 남지 않게 하려는 것입니다. 기본 60초(저장할 시간).
    - 처리기가 없으면(파이썬이 아님, `python -S`/`-I`, 이미지 설정으로 가려짐 등) 오류를 내지 않고 바로 5로 멈춰 둡니다.
+     한 세션이 여러 번에 나뉘어 멈춰 지면 멈춘 프로세스들을 한 기록으로 모으고, 모두 GPU에서 빠진 뒤 함께 되살립니다.
    - 처리기는 스팟 플러그인이 넣는 `sitecustomize.py`가 겁니다(`/opt/labgpu/python`을 읽기 전용으로 붙이고
      `PYTHONPATH`에 둠, 신호 번호는 `LABGPU_SPOT_OOM_SIGNAL`). 이미지 자체의 `sitecustomize`도 이어서 불러옵니다.
      `SIGUSR1/2`는 쓰지 않습니다. HAMi-core가 CUDA 초기화 때 SIGUSR1을 가져가 파이썬 처리기를 덮어씁니다.
@@ -427,7 +430,16 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 5. **멈춰 두기(Park)**: lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는 CUDA 호출에서
    기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore). 멈춰 둔 스팟은 새로 옮겨야
    하는 스팟보다 먼저 자리를 받습니다. 빈 GPU가 생길 때까지 **기한 없이** 기다립니다.
-6. 옮기거나 되살린 뒤에는 새 GPU의 빌려줄 수 있는 메모리로 HAMi-core 제한(`cuda:0`)을 다시 맞춥니다.
+6. **옮기거나 되살린 뒤의 GPU 순서와 제한.** 컨테이너 환경변수(`CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_*`)는
+   처음 값 그대로라, 그대로 두면 새로 뜨는 프로그램의 `cuda:0`이 **주인에게 돌아간 원래 GPU**가 됩니다. 그래서:
+   - HAMi-core 공유 제한을 `cuda:0`(지금 쓰는 GPU) = 그 GPU의 빌려줄 수 있는 메모리, 나머지 GPU(원래 GPU 포함) = 1MiB로
+     다시 맞춥니다. 옮겨 간 프로세스는 device-map으로 `cuda:0`이 새 GPU가 되므로 이 순서와 같습니다.
+   - `/tmp/labgpu-spot-env`에 지금 쓰는 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`와 위 제한을 씁니다(세션 사용자 소유).
+     새 파이썬 프로그램은 `sitecustomize`가, 새 셸은 `/etc/profile.d/labgpu-spot.sh`(읽기 전용 마운트, 비대화형
+     bash는 `BASH_ENV`)가 CUDA가 시작되기 전에 이 값을 가져가므로 `nvidia-smi`와 새 프로그램이 지금 GPU를 첫째로 봅니다.
+   - 이미 떠 있던 셸이나 이 파일을 거치지 않는 프로그램은 처음 순서를 봅니다. 그런 프로그램이 원래 GPU에 메모리를
+     잡으면 감시기는 그것을 스팟 프로세스로 보고, 스팟이 GPU 두 장에 걸친 것이 되어 규칙 8(OOM 오류)이 적용됩니다.
+     제한이 1MiB라 원래 GPU에 실제로 잡을 수 있는 양도 없습니다.
 7. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기거나 멈춰 둘 수 없으므로
    4의 OOM 오류만 냅니다(`oom_grace_seconds`마다 다시). 처리기가 없거나 오류를 잡고 계속 돌면 주인 GPU를 함께
    쓰게 되므로, cuda-checkpoint가 동작하는 노드에서만 스팟을 켜는 것이 맞습니다. 이동이 실패하면 OOM 오류를 냅니다.
@@ -548,8 +560,9 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 세션(`cuda-pro6000-spot.device` 1): 환경변수(`LABGPU_SPOT_GPU`, 고른 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_0=95184m`, `_1=1m`), HAMi-core 로드, 컨테이너 안 `/opt/labgpu/cuda-checkpoint`. torch 2.11(cu128): `cuda:0`이 고른 PRO 6000, 8GB 할당 성공, `cuda:1`에 100MB는 `OutOfMemoryError`(총 1024KiB). 컨테이너 안 `nvidia-smi`는 95184MiB / 1MiB. 학습을 돌리면 그 GPU가 LENT | 확인 (2026-09-27, Primary, `1398dbf`) |
 | 주인 세션이 같은 GPU를 받으면 감시기가 5초 안에 이동 시작(`new owner containers`) | 감지 확인 (2026-09-27, Primary). 이동 자체는 위 행의 권한 문제로 실패 |
 | 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt` | 확인 (2026-09-27, Primary, `1398dbf`). 이때는 유예 뒤 SIGKILL도 했으나, 사용자 결정으로 강제 종료를 없앰(규칙 5). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt`가 나지 않음. 강제 종료 없는 새 방식은 UNVERIFIED |
-| 알려진 부작용(동작에는 영향 없음): 이동 뒤 컨테이너에서 새로 띄운 프로세스가 HAMi-core `Limit inconsistency detected for 0th device` ERROR를 냄(처음 환경변수 제한과 공유 영역 값이 달라서). 이동 뒤에도 새 프로세스의 `nvidia-smi`는 처음 GPU 순서로 보임(옮겨 간 프로그램은 새 GPU를 씀). root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |
-| 한 컨테이너에 처리기가 있는 프로세스와 없는 프로세스가 섞여 있으면 컨테이너 전체를 오류 없이 바로 멈춰 둠(주인 GPU를 붙잡는 프로세스가 남지 않게 하려는 의도) | 확인 (2026-09-27, Primary) |
+| 이동 뒤 문제(`903285a`): 새로 띄운 프로세스와 `nvidia-smi`가 처음 GPU 순서를 봐서, 주인에게 돌아간 원래 GPU가 `cuda:0`이면서 빌려줄 수 있는 메모리(약 95GB)만큼 열려 있었음. HAMi-core `Limit inconsistency` ERROR. 규칙 6으로 고침(`/tmp/labgpu-spot-env`, `sitecustomize`, `/etc/profile.d`) | 문제 확인 (2026-09-27, Primary). 수정본 UNVERIFIED |
+| 처리기가 있는 프로세스와 없는 프로세스가 섞이면 세션 전체를 오류 없이 멈춰 두던 것(`903285a`, 사용자 방침과 다름)을 프로세스마다로 고침 | 수정본 UNVERIFIED |
+| root로 `docker exec`해 `nvidia-smi`를 돌리면 `Fail to open shrreg errno=13`(세션 사용자로는 정상) | 확인 (2026-09-27, Primary) |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문

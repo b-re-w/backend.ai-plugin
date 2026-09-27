@@ -77,6 +77,7 @@ ENV_SPOT = "LABGPU_SPOT"
 ENV_SPOT_UUIDS = "LABGPU_SPOT_UUIDS"
 ENV_SPOT_GPU = "LABGPU_SPOT_GPU"
 CONTAINER_PYTHON_DIR = "/opt/labgpu/python"
+CONTAINER_PROFILE = "/etc/profile.d/labgpu-spot.sh"
 INJECT_DIR = Path(__file__).resolve().parent.parent / "spot" / "inject"
 BLOCKED_LIMIT = "1m"  # HAMi-core limit for GPUs the session must not use (0 would mean unlimited)
 RESERVE_SECONDS = 120.0  # how long a GPU handed to a new session stays taken before the monitor reports it
@@ -277,6 +278,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
             # SPEC 2.12: the out-of-memory error for a session that cannot be moved.
             "PYTHONPATH": CONTAINER_PYTHON_DIR,
+            "BASH_ENV": CONTAINER_PROFILE,
             "LABGPU_SPOT_OOM_SIGNAL": str(OOM_SIGNAL),
         }
         for i, uuid in enumerate(order):
@@ -334,11 +336,16 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         tool = self.cuda_checkpoint
         if not tool.is_file():
             log.warning("[%s] %s not found: this spot session cannot be moved", self.entry_name, tool)
-            return [MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR))]
+            return self._inject_mounts()
+        return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)), *self._inject_mounts()]
+
+    @staticmethod
+    def _inject_mounts() -> list[MountInfo]:
         return [
-            MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)),
-            # sitecustomize.py that turns the monitor's signal into torch.OutOfMemoryError.
+            # sitecustomize.py: torch.OutOfMemoryError on the monitor's signal, GPU order after moves.
             MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR)),
+            # The same GPU order for shells (and so nvidia-smi) started after a move.
+            MountInfo(MountTypes.BIND, INJECT_DIR / "labgpu-spot.sh", Path(CONTAINER_PROFILE)),
         ]
 
     # ---- metadata ----

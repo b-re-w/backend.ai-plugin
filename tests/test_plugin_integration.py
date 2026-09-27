@@ -282,7 +282,8 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     tool = tmp_path / "cuda-checkpoint"
     tool.write_bytes(b"")
     spot.cuda_checkpoint = tool
-    tool_mount, py_mount = asyncio.run(spot.generate_mounts(tmp_path, alloc))
+    tool_mount, py_mount, sh_mount = asyncio.run(spot.generate_mounts(tmp_path, alloc))
+    assert str(sh_mount.dst_path) == "/etc/profile.d/labgpu-spot.sh" and sh_mount.src_path.is_file()
     assert (tool_mount.src_path, str(tool_mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")
     assert str(py_mount.dst_path) == "/opt/labgpu/python"
     assert (py_mount.src_path / "sitecustomize.py").is_file()

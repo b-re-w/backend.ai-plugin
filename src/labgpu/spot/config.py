@@ -60,7 +60,7 @@ class SpotConfig:
     cuda_checkpoint: Path = field(default_factory=default_cuda_checkpoint)
     checkpoint_timeout_seconds: float = 60.0
     # After the out-of-memory error, a program still on the reclaimed GPU this long is parked off it.
-    oom_grace_seconds: float = 10.0
+    oom_grace_seconds: float = 60.0
 
 
 @dataclass(frozen=True)

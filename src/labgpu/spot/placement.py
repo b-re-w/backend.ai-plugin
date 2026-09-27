@@ -28,7 +28,7 @@ class RunningSpot:
     gpus: frozenset[str]  # GPUs its processes are on right now
     allowed: tuple[str, ...]  # GPUs attached to the container
     since: float  # when the monitor first saw it on its current GPU
-    oom_ready: bool = True  # every process has the out-of-memory signal handler installed
+    oom_ready: bool = True  # at least one process has the out-of-memory signal handler installed
 
 
 @dataclass(frozen=True)
@@ -117,9 +117,10 @@ def plan(
         taken.add(best.uuid)
         return best.uuid
 
+    running_ids = {s.container_id for s in running}
     for p in sorted(parked, key=lambda p: p.since):
-        if p.container_id in busy:
-            continue
+        if p.container_id in busy or p.container_id in running_ids:
+            continue  # partly parked: restore once all its processes are off the GPU
         dst = target(p.src, p.allowed, may_return=True)
         if dst is not None:
             actions.append(Restore(p.container_id, p.src, dst))
@@ -145,7 +146,7 @@ def plan(
         if dst is not None:
             actions.append(Move(s.container_id, src, dst, reason))
         elif parkable and not s.oom_ready:
-            actions.append(Park(s.container_id, src, reason))  # it could not see the error
+            actions.append(Park(s.container_id, src, reason))  # no process could see the error
         elif last is None:
             actions.append(Oom(s.container_id, src, reason))
         elif parkable and now - last >= oom_grace:

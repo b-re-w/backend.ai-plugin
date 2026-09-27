@@ -155,11 +155,11 @@ class CudaCheckpoint:
             self._try(lambda: self.restore(cid, pids, src, src, visible))
             raise
 
-    def set_limit(self, cid: str, pid: int, size: int) -> None:
-        set_limit(cid, pid, size=size, run=self.run, identify=self.identify)
+    def place(self, cid: str, pid: int, order: Sequence[str], size: int) -> None:
+        place(cid, pid, order=order, size=size, run=self.run, identify=self.identify)
 
-    def raise_oom(self, cid: str, pids: Sequence[int], devices: int, reason: str) -> None:
-        raise_oom(cid, pids, devices=devices, reason=reason, run=self.run, identify=self.identify)
+    def raise_oom(self, cid: str, pids: Sequence[int], order: Sequence[str], reason: str) -> None:
+        raise_oom(cid, pids, order=order, reason=reason, run=self.run, identify=self.identify)
 
     @staticmethod
     def _try(fn: Callable[[], None]) -> None:
@@ -174,12 +174,15 @@ class CudaCheckpoint:
 OOM_SIGNAL = 44  # SIGRTMIN + 10 with glibc; passed to the container as LABGPU_SPOT_OOM_SIGNAL
 BLOCKED_BYTES = 1 << 20
 
+SPOT_ENV_FILE = "/tmp/labgpu-spot-env"  # read by the injected sitecustomize in new programs
+
 # Runs inside the container as the session user. HAMi-core is loaded into every process there
 # through /etc/ld.so.preload, so its runtime limit setter is reachable with ctypes.CDLL(None); the
-# limit lives in the session's shared region and every later allocation re-reads it.
+# limit lives in the session's shared region and every later allocation re-reads it. It also
+# rewrites SPOT_ENV_FILE so programs started later see the GPU order and limits in force.
 _PY = """
 import ctypes, os, sys
-limits, pids, sig = eval(sys.argv[1]), eval(sys.argv[2]), int(sys.argv[3])
+limits, pids, sig, env_text = eval(sys.argv[1]), eval(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 try:
     f = ctypes.CDLL(None).set_current_device_memory_limit
     f.argtypes = [ctypes.c_int, ctypes.c_size_t]
@@ -187,13 +190,18 @@ try:
         f(dev, size)
 except AttributeError:
     print("HAMi-core not loaded: memory limit unchanged", file=sys.stderr)
+if env_text:
+    tmp = "%s.%d" % (sys.argv[5], os.getpid())
+    with open(tmp, "w") as out:
+        out.write(env_text)
+    os.replace(tmp, sys.argv[5])
 for pid in pids:
     try:
         os.kill(pid, sig)
     except ProcessLookupError:
         pass
 """
-_SH = 'if [ -n "$1" ]; then printf "%s\n" "$1" > ' + EVICT_MARKER + """; fi
+_SH = 'if [ -n "$1" ]; then printf "%s\\n" "$1" > ' + EVICT_MARKER + """; fi
 shift
 for py in python3 python; do
   command -v "$py" >/dev/null 2>&1 && exec "$py" -c "$@"
@@ -201,18 +209,33 @@ done
 echo "no python in the container" >&2; exit 1"""
 
 
+def spot_env(order: Sequence[str], limits: Sequence[int]) -> str:
+    """
+    What a program started now must see (SPEC 2.12): the GPU the session currently uses first,
+    so it is cuda:0, and the HAMi-core limit per CUDA index (1 MiB for every GPU but that one).
+    """
+    lines = [f"CUDA_VISIBLE_DEVICES={','.join(order)}", f"LABGPU_SPOT_GPU={order[0]}"]
+    lines += [f"CUDA_DEVICE_MEMORY_LIMIT_{i}={max(b // (1 << 20), 1)}m" for i, b in enumerate(limits)]
+    return "\n".join(lines) + "\n"
+
+
 def _hami(
-    run: Callable[..., str], cid: str, user: str, limits: Sequence[tuple[int, int]],
+    run: Callable[..., str], cid: str, user: str, limits: Sequence[int], order: Sequence[str],
     pids: Sequence[int] = (), sig: int = 0, marker: str = "",
 ) -> None:
-    run(cid, "sh", "-c", _SH, "sh", marker, _PY, repr(list(limits)), repr(list(pids)), str(sig), user=user)
+    env_text = spot_env(order, limits) if order else ""
+    run(
+        cid, "sh", "-c", _SH, "sh", marker, _PY,
+        repr(list(enumerate(limits))), repr(list(pids)), str(sig), env_text, SPOT_ENV_FILE,
+        user=user,
+    )
 
 
 def raise_oom(
     cid: str,
     pids: Sequence[int],
     *,
-    devices: int,
+    order: Sequence[str],
     reason: str,
     run: Callable[..., str] | None = None,
     identify: Callable[[int], ProcIdentity] = identify,
@@ -221,28 +244,33 @@ def raise_oom(
     Out-of-memory error in the spot program right now (SPEC 2.12, user decision): every attached
     GPU's HAMi-core limit drops to 1 MiB so any further allocation fails too, the marker file
     records why, and OOM_SIGNAL makes the injected handler raise torch.OutOfMemoryError in the
-    main thread. Never kills.
+    main thread. Never kills. `order`: attached GPUs, the one it is on first.
     """
     run = run or DockerExec()
     who = {p: identify(p) for p in pids if _exists(p)}
     if not who:
         return
     owner = next(iter(who.values())).user
-    limits = [(d, BLOCKED_BYTES) for d in range(max(devices, 1))]
-    _hami(run, cid, owner, limits, [w.pid for w in who.values()], OOM_SIGNAL, reason)
+    limits = [BLOCKED_BYTES] * max(len(order), 1)
+    _hami(run, cid, owner, limits, order, [w.pid for w in who.values()], OOM_SIGNAL, reason)
 
 
-def set_limit(
+def place(
     cid: str,
     pid: int,
     *,
+    order: Sequence[str],
     size: int,
     run: Callable[..., str] | None = None,
     identify: Callable[[int], ProcIdentity] = identify,
 ) -> None:
-    """Give the program's cuda:0 `size` bytes again, e.g. after it moved to a new lendable GPU."""
+    """
+    After a move or restore: cuda:0 (the GPU it now runs on, `order[0]`) gets `size` bytes and
+    every other attached GPU, including the one handed back to its owner, 1 MiB (SPEC 2.12).
+    """
     run = run or DockerExec()
-    _hami(run, cid, identify(pid).user, [(0, max(size, BLOCKED_BYTES))])
+    limits = [max(size, BLOCKED_BYTES)] + [BLOCKED_BYTES] * (len(order) - 1)
+    _hami(run, cid, identify(pid).user, limits, order)
 
 
 def _exists(pid: int) -> bool:

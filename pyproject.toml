@@ -32,7 +32,7 @@ gpu_spot_4 = "labgpu.accelerator.gpu_spot:SpotSlotPlugin4"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"labgpu.spot" = ["inject/*.py"]
+"labgpu.spot" = ["inject/*.py", "inject/*.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

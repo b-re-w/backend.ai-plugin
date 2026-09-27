@@ -195,11 +195,11 @@ class FakeCkpt:
     def restore(self, cid, pids, src, dst, visible):
         self.calls.append(("restore", tuple(pids), src, dst))
 
-    def set_limit(self, cid, pid, size):
-        self.calls.append(("limit", pid, size))
+    def place(self, cid, pid, order, size):
+        self.calls.append(("place", pid, tuple(order), size))
 
-    def raise_oom(self, cid, pids, devices, reason):
-        self.calls.append(("oom", tuple(pids), devices))
+    def raise_oom(self, cid, pids, order, reason):
+        self.calls.append(("oom", tuple(pids), tuple(order)))
 
 
 class Inline:
@@ -240,7 +240,10 @@ def test_controller_moves_spot_when_owner_returns(tmp_path):
     procs[0][0] = (10, 4 * GiB, 80, OWNER)  # owner is back
     c.tick(90)
     assert ck.calls[0] in (("move", (20,), "GPU-0", "GPU-1"), ("move", (20,), "GPU-0", "GPU-2"))
-    assert ck.calls[1][:2] == ("limit", 20) and ck.calls[1][2] > 80 * GiB  # new GPU's lendable memory
+    dst = ck.calls[0][3]
+    # The new GPU becomes cuda:0 with its lendable memory; GPU-0 (back to its owner) gets 1 MiB.
+    assert ck.calls[1][:2] == ("place", 20) and ck.calls[1][2][0] == dst and ck.calls[1][2][1] == "GPU-0"
+    assert ck.calls[1][3] > 80 * GiB
     c.write_status(tmp_path / "status.json", 90)
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["can_move"] is True and status["gpus"][0]["lent_job"] == SPOT[:12]
@@ -276,9 +279,10 @@ def test_controller_raises_oom_then_parks_a_program_that_keeps_the_gpu(tmp_path)
     procs[0].append((20, 30 * GiB, 90, SPOT))
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
     c.tick(80)
-    assert ck.calls == [("oom", (20,), 3)]  # torch.OutOfMemoryError right away, never killed
+    oom = ("oom", (20,), ("GPU-0", "GPU-1", "GPU-2"))
+    assert ck.calls == [oom]  # torch.OutOfMemoryError right away, never killed
     c.tick(85)
-    assert ck.calls == [("oom", (20,), 3)]  # gives the program oom_grace to react
+    assert ck.calls == [oom]  # gives the program oom_grace to react
     c.tick(91)
     assert ck.calls[-1] == ("park", (20,))  # still holding the owner's GPU: off the GPU
 
@@ -381,15 +385,54 @@ def test_oom_lowers_limits_and_signals_as_owner(monkeypatch):
 
     monkeypatch.setattr(ckpt, "_exists", lambda pid: True)
     calls = []
-    ckpt.raise_oom("c1", [4242], devices=2, reason="no free GPU",
+    ckpt.raise_oom("c1", [4242], order=["GPU-b", "GPU-a"], reason="no free GPU",
                    run=lambda cid, *argv, user: calls.append((user, argv)) or "",
                    identify=lambda p: ckpt.ProcIdentity(17, "1100:1200"))
     [(user, argv)] = calls
     assert user == "1100:1200" and argv[:2] == ("sh", "-c")
-    marker, code, limits, pids, sig = argv[4:9]
+    marker, code, limits, pids, sig, env_text, env_file = argv[4:11]
     assert marker == "no free GPU" and "set_current_device_memory_limit" in code
     assert eval(limits) == [(0, 1 << 20), (1, 1 << 20)] and eval(pids) == [17]
     assert int(sig) == ckpt.OOM_SIGNAL and "KILL" not in code
+    assert "CUDA_DEVICE_MEMORY_LIMIT_0=1m" in env_text and env_file == ckpt.SPOT_ENV_FILE
+
+
+def test_place_blocks_every_gpu_but_the_current_one():
+    from labgpu.spot import ckpt
+
+    calls = []
+    ckpt.place("c1", 4242, order=["GPU-b", "GPU-a", "GPU-c"], size=10 << 30,
+               run=lambda cid, *argv, user: calls.append(argv) or "",
+               identify=lambda p: ckpt.ProcIdentity(17, "1100:1200"))
+    [argv] = calls
+    limits, env_text = eval(argv[6]), argv[9]
+    assert limits == [(0, 10 << 30), (1, 1 << 20), (2, 1 << 20)]
+    assert env_text.splitlines() == [
+        "CUDA_VISIBLE_DEVICES=GPU-b,GPU-a,GPU-c", "LABGPU_SPOT_GPU=GPU-b",
+        "CUDA_DEVICE_MEMORY_LIMIT_0=10240m", "CUDA_DEVICE_MEMORY_LIMIT_1=1m", "CUDA_DEVICE_MEMORY_LIMIT_2=1m",
+    ]
+
+
+def test_mixed_processes_each_get_their_own_treatment(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    c.handler_check = lambda pid: pid == 20  # 20 installed the handler, 21 did not
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0] += [(20, 20 * GiB, 90, SPOT), (21, 10 * GiB, 90, SPOT)]
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    # 21 is taken off the GPU at once; 20 gets the error and its grace period.
+    assert ck.calls == [("park", (21,)), ("oom", (20,), ("GPU-0", "GPU-1", "GPU-2"))]
+    procs[0].remove((21, 10 * GiB, 90, SPOT))
+    c.tick(85)
+    assert c.parked[SPOT].pids == (21,)
+    c.tick(91)  # 20 still holds the GPU after the grace: parked too, same record
+    assert ck.calls[-1] == ("park", (20,))
+    procs[0].remove((20, 20 * GiB, 90, SPOT))
+    c.tick(92)
+    assert set(c.parked[SPOT].pids) == {20, 21}
 
 
 def test_has_handler_reads_sigcgt(tmp_path):
@@ -414,3 +457,22 @@ def test_parked_spot_without_room_stays_parked(tmp_path):
     for t in (85, 400, 900):
         c.tick(t)
     assert SPOT in c.parked and ck.calls == [("park", (20,))]  # waits off the GPU, never killed
+
+
+def test_sitecustomize_follows_the_monitor_env_file(tmp_path, monkeypatch):
+    import importlib.util
+
+    env = tmp_path / "env"
+    env.write_text("CUDA_VISIBLE_DEVICES=GPU-b,GPU-a\nCUDA_DEVICE_MEMORY_LIMIT_0=10m\nPATH=/evil\n")
+    spec = importlib.util.spec_from_file_location(
+        "labgpu_site", Path(__file__).parents[1] / "src/labgpu/spot/inject/sitecustomize.py")
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-a,GPU-b")
+    monkeypatch.setenv("LABGPU_SPOT_OOM_SIGNAL", "0")
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_ENV_FILE", str(env))
+    path_before = __import__("os").environ["PATH"]
+    module._follow_moves()
+    import os
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-b,GPU-a"
+    assert os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] == "10m" and os.environ["PATH"] == path_before

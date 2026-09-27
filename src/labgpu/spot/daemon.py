@@ -12,7 +12,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -204,7 +204,7 @@ class Controller:
                 frozenset(gs),
                 self.spot_info[cid].uuids if cid in self.spot_info else tuple(gs),
                 min(self.spot_seen[(cid, g)] for g in gs),
-                oom_ready=all(self.handler_check(pid) for pid in self._pids_on(cid, None)),
+                oom_ready=any(self.handler_check(pid) for pid in self._pids_on(cid, None)),
             )
             for cid, gs in gpus_of.items()
         ]
@@ -264,9 +264,9 @@ class Controller:
 
                 def job() -> None:
                     ck.move(cid, pids, src, dst, visible)
-                    ck.set_limit(cid, pids[0], size)
+                    ck.place(cid, pids[0], self._order(visible, dst), size)
 
-                fallback = self._oom_job(cid, pids, len(visible), reason)
+                fallback = self._oom_job(cid, pids, self._order(visible, src), reason)
             case Park(_, src, reason):
                 pids = self._pids_on(cid, src)
                 record = ParkedRecord(ParkedSpot(cid, src, visible, now), pids, self._mem_on(cid, src))
@@ -280,21 +280,46 @@ class Controller:
 
                 def job() -> None:
                     ck.restore(cid, record.pids, src, dst, record.spot.allowed)
-                    ck.set_limit(cid, record.pids[0], size)
+                    ck.place(cid, record.pids[0], self._order(record.spot.allowed, dst), size)
 
                 fallback = None
             case Oom(_, gpu, reason):
+                # Per process (SPEC 2.12): one that installed the handler gets the error; one that
+                # did not is parked right away so it does not keep the owner's GPU.
                 pids = self._pids_on(cid, None)
-                log.warning("spot %s: out-of-memory error on %s (%s) pids=%s", cid[:12], gpu, reason, pids)
+                ready = tuple(p for p in pids if self.handler_check(p))
+                silent = tuple(p for p in pids if p not in ready) if self.can_checkpoint else ()
+                log.warning(
+                    "spot %s: out-of-memory error on %s (%s) pids=%s, parked without it=%s",
+                    cid[:12], gpu, reason, ready or pids, silent,
+                )
                 self.oomed[cid] = now
-                job = self._oom_job(cid, pids, len(visible), reason)
-                fallback = None
+                oom = self._oom_job(cid, ready or pids, self._order(visible, gpu), reason)
+                record = (
+                    ParkedRecord(ParkedSpot(cid, gpu, visible, now), silent, self._mem_on(cid, gpu))
+                    if silent
+                    else None
+                )
+
+                def job() -> None:
+                    if silent:
+                        ck.park(cid, silent)
+                    if ready or not silent:
+                        oom()
+
+                self._submit(action, job, None, record)
+                return
         self._submit(action, job, fallback, None)
 
-    def _oom_job(self, cid: str, pids: tuple[int, ...], devices: int, reason: str) -> Callable[[], None]:
+    @staticmethod
+    def _order(visible: Sequence[str], current: str) -> list[str]:
+        """Attached GPUs with the one the session runs on first: its programs' cuda:0."""
+        return [current, *(u for u in visible if u != current)]
+
+    def _oom_job(self, cid: str, pids: tuple[int, ...], order: list[str], reason: str) -> Callable[[], None]:
         """torch.OutOfMemoryError in the program right away (SPEC 2.12). Nothing is ever killed."""
         ck = self.checkpointer
-        return lambda: ck.raise_oom(cid, pids, devices, reason)
+        return lambda: ck.raise_oom(cid, pids, order, reason)
 
     def _submit(
         self,
@@ -335,8 +360,14 @@ class Controller:
         for action, ok, record in done:
             cid = action.container_id
             self.busy.pop(cid, None)
-            if isinstance(action, Park) and ok and record is not None:
-                self.parked[cid] = record
+            if isinstance(action, (Park, Oom)) and ok and record is not None:
+                old = self.parked.get(cid)
+                # A session may be parked in parts (processes without the handler first).
+                self.parked[cid] = (
+                    replace(old, pids=tuple(dict.fromkeys(old.pids + record.pids)), memory=old.memory + record.memory)
+                    if old is not None
+                    else record
+                )
                 changed = True
             elif isinstance(action, Restore) and ok and cid in self.parked:
                 del self.parked[cid]
