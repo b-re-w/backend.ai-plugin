@@ -35,6 +35,16 @@ class SpotContainer:
     pid: int
     uuids: tuple[str, ...]  # every GPU attached to it: where it may run or be moved to
     gpu: str = ""  # the GPU the spot plugin gave it (LABGPU_SPOT_GPU at creation)
+    share: float = 1.0  # its share of one GPU (LABGPU_SPOT_SHARE, SPEC 2.12)
+
+
+def parse_share(value: str | None) -> float:
+    """A spot session's share of one GPU; missing or invalid means a whole GPU (SPEC 2.12)."""
+    try:
+        share = float(value) if value else 1.0
+    except ValueError:
+        return 1.0
+    return share if 0 < share <= 1 else 1.0
 
 
 def _env(inspect: Mapping[str, Any]) -> dict[str, str]:
@@ -85,6 +95,7 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         pid=int((inspect.get("State") or {}).get("Pid") or 0),
         uuids=tuple(u for u in env.get(ENV_SPOT_UUIDS, "").split(",") if u),
         gpu=env.get("LABGPU_SPOT_GPU", ""),
+        share=parse_share(env.get("LABGPU_SPOT_SHARE")),
     )
 
 

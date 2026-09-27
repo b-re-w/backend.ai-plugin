@@ -10,7 +10,7 @@ from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
 from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
-from labgpu.spotstatus import parse_status, pick_spot_gpu, spot_capacity
+from labgpu.spotstatus import parse_status, pick_spot_gpu, roomiest_spot_gpu, spot_capacity
 
 P6K = "NVIDIA RTX PRO 6000"
 A6K = "NVIDIA RTX A6000"
@@ -95,7 +95,7 @@ def test_second_spot_on_the_same_gpu_leaves_and_busy_is_skipped():
         RunningSpot("new", frozenset({"A"}), ("A", "B"), 5),
     ]
     [mv] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
-    assert mv == Move("new", "A", "B", "another spot session is on this GPU")
+    assert mv == Move("new", "A", "B", "spot sessions on this GPU exceed one GPU in total")
     assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10,
                 busy=frozenset({"new"})) == []
 
@@ -318,18 +318,66 @@ def test_background_monitor_runs_once_per_process(tmp_path):
     assert BackgroundMonitor._running is None
 
 
-def test_pick_spot_gpu_takes_the_roomiest_free_lendable_gpu():
+def test_pick_spot_gpu_best_fit_by_share():
     text = json.dumps({"updated_at": 100, "gpus": [
-        {"uuid": "A", "state": "LENDABLE", "lendable_memory": 10},
-        {"uuid": "B", "state": "LENDABLE", "lendable_memory": 50},
-        {"uuid": "C", "state": "LENT", "lent_job": "x", "lendable_memory": 0},
+        {"uuid": "A", "state": "LENDABLE", "spot_capacity": 10},
+        {"uuid": "B", "state": "LENDABLE", "spot_capacity": 50},
+        {"uuid": "C", "state": "LENT", "lent_job": "x", "spot_share": 0.5, "spot_capacity": 40},
         {"uuid": "D", "state": "BUSY"},
+        {"uuid": "E", "state": "LENT", "lent_job": "y"},  # older monitor: fully taken
     ]})
     status = parse_status(text, 110)
-    assert pick_spot_gpu(["A", "B", "C", "D"], status) == ("B", 50)
-    assert pick_spot_gpu(["A", "B"], status, taken={"B"}) == ("A", 10)
-    assert pick_spot_gpu(["C", "D"], status) is None
+    # A whole GPU: the empty one with more capacity.
+    assert pick_spot_gpu(["A", "B", "C", "D", "E"], status, 1.0) == ("B", 50)
+    # Half a GPU: C is already half full, so it is filled first and A, B stay whole.
+    assert pick_spot_gpu(["A", "B", "C", "D", "E"], status, 0.5) == ("C", 40)
+    # Shares just handed out count as taken.
+    assert pick_spot_gpu(["A", "B", "C"], status, 0.5, taken={"C": 0.5}) == ("B", 50)
+    assert pick_spot_gpu(["C", "D", "E"], status, 0.75) is None
     assert pick_spot_gpu(["A"], None) is None
+    # Fragmented: nothing fits 0.75, the roomiest GPU is offered with what it has left.
+    assert roomiest_spot_gpu(["C", "D", "E"], status) == ("C", 40, 0.5)
+
+
+def test_several_fractional_spots_share_one_gpu():
+    verdicts = {"A": v("A", GpuState.LENT), "B": v("B", GpuState.LENDABLE)}
+    running = [
+        RunningSpot("a", frozenset({"A"}), ("A", "B"), 0, share=0.5),
+        RunningSpot("b", frozenset({"A"}), ("A", "B"), 1, share=0.25),
+        RunningSpot("c", frozenset({"A"}), ("A", "B"), 2, share=0.25),
+    ]
+    assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10) == []
+    # A fourth one would push A over one GPU: the latest arrival leaves.
+    running.append(RunningSpot("d", frozenset({"A"}), ("A", "B"), 3, share=0.25))
+    [mv] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    assert mv == Move("d", "A", "B", "spot sessions on this GPU exceed one GPU in total")
+
+
+def test_reclaim_moves_each_fractional_spot_where_its_share_fits():
+    verdicts = {
+        "A": v("A", GpuState.RECLAIMING, must=True, reasons=("owner back",)),
+        "B": v("B", GpuState.LENT),  # 0.5 used by another spot already
+        "C": v("C", GpuState.LENDABLE),
+    }
+    running = [
+        RunningSpot("x", frozenset({"B"}), ("A", "B", "C"), 0, share=0.5),
+        RunningSpot("a1", frozenset({"A"}), ("A", "B", "C"), 1, share=0.5),
+        RunningSpot("a2", frozenset({"A"}), ("A", "B", "C"), 2, share=0.5),
+    ]
+    actions = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    # a1 fills B's free half (best fit); B is then full, so a2 gets the empty C; x stays on B.
+    assert Move("a1", "A", "B", "owner back") in actions
+    assert Move("a2", "A", "C", "owner back") in actions
+    assert len(actions) == 2
+
+
+def test_parked_fractional_spot_restores_into_a_partly_used_gpu():
+    verdicts = {"A": v("A", GpuState.BUSY), "B": v("B", GpuState.LENT)}
+    running = [RunningSpot("x", frozenset({"B"}), ("A", "B"), 0, share=0.5)]
+    parked = [ParkedSpot("p", "A", ("A", "B"), 5, share=0.5)]
+    assert plan(verdicts, running, parked, now=10, can_checkpoint=True, oom_grace=10) == [Restore("p", "A", "B")]
+    too_big = [ParkedSpot("p", "A", ("A", "B"), 5, share=0.75)]
+    assert plan(verdicts, running, too_big, now=10, can_checkpoint=True, oom_grace=10) == []
 
 
 def test_state_dir_follows_the_agent_var_base_path():

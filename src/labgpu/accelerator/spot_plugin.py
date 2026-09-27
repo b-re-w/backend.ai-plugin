@@ -1,8 +1,9 @@
 """
 Spot launch mode as Backend.AI accelerator plugins (SPEC 2.12).
 
-`gpu_spot_1..4` each offer `<key>.device` for one GPU model, e.g. `pro6000-spot.device`. A spot
-session is a normal Backend.AI session that requests it from the WebUI session launcher. The slot
+`gpu_spot_1..4` each offer `<key>.shares` for one GPU model, e.g. `cuda-pro6000-spot.shares`. A
+spot session is a normal Backend.AI session that requests a share of one GPU (0 < share <= 1) from
+the WebUI session launcher; several spot sessions can share a GPU up to a total of 1. The slot
 capacity is the number of GPUs of that model the idleness monitor currently judges lendable or
 lent, re-read every time the agent refreshes its slots (30 s in 26.8), so the manager only
 schedules spot sessions while there is room. This plugin picks the GPU a new spot session runs on
@@ -32,7 +33,7 @@ from ai.backend.agent.resources import (
     AbstractAllocMap,
     AbstractComputePlugin,
     DeviceSlotInfo,
-    DiscretePropertyAllocMap,
+    FractionAllocMap,
 )
 from ai.backend.agent.stats import (
     ContainerMeasurement,
@@ -61,6 +62,7 @@ from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
 from .plugin import (
     DEVICE_CAPABILITIES,
+    AllocationStrategy,
     PROCESSING_UNITS,
     CUDAFracDevice,
     PluginNotConfigured,
@@ -76,11 +78,13 @@ POOL_DEVICE_ID = DeviceId("spot")
 ENV_SPOT = "LABGPU_SPOT"
 ENV_SPOT_UUIDS = "LABGPU_SPOT_UUIDS"
 ENV_SPOT_GPU = "LABGPU_SPOT_GPU"
+ENV_SPOT_SHARE = "LABGPU_SPOT_SHARE"
 CONTAINER_PYTHON_DIR = "/opt/labgpu/python"
 CONTAINER_PROFILE = "/etc/profile.d/labgpu-spot.sh"
 INJECT_DIR = Path(__file__).resolve().parent.parent / "spot" / "inject"
 BLOCKED_LIMIT = "1m"  # HAMi-core limit for GPUs the session must not use (0 would mean unlimited)
-RESERVE_SECONDS = 120.0  # how long a GPU handed to a new session stays taken before the monitor reports it
+RESERVE_SECONDS = 120.0  # how long a share handed to a new session stays taken before the monitor reports it
+QUANTUM = Decimal("0.01")  # smallest spot share (SPEC 2.12)
 
 
 class LabGpuSpotPlugin(AbstractComputePlugin):
@@ -102,11 +106,11 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     _monitor: Any = None  # the BackgroundMonitor this instance started, if any
     hook_path: Path = default_hook_path()
     cuda_checkpoint: Path = Path("cuda-checkpoint")
-    _handed_out: dict[str, float] | None = None  # GPU uuid -> when a new session got it
+    _handed_out: list[tuple[str, float, float]] | None = None  # (GPU uuid, when, share) handed to new sessions
 
     @property
     def slot(self) -> SlotName:
-        return SlotName(f"{self.key}.device")
+        return SlotName(f"{self.key}.shares")
 
     @property
     def is_fake(self) -> bool:
@@ -129,7 +133,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         )
         self.spot_status_max_age = float(cfg.get("spot_status_max_age", spotstatus.DEFAULT_MAX_AGE))
         self.hook_path = Path(cfg["hook_path"]) if cfg.get("hook_path") else default_hook_path()
-        self._handed_out = {}
+        self._handed_out = []
         self.slot_types = ((self.slot, SlotTypes.COUNT),)
         self.exclusive_slot_types = {str(self.slot)}
         try:
@@ -237,8 +241,12 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             if gpus
             else {}
         )
-        return DiscretePropertyAllocMap(
-            device_slots=devices, exclusive_slot_types=self.exclusive_slot_types
+        # Fractional: a spot session asks for a share of one GPU (SPEC 2.12).
+        return FractionAllocMap(
+            device_slots=devices,
+            exclusive_slot_types=self.exclusive_slot_types,
+            allocation_strategy=AllocationStrategy.FILL,
+            quantum_size=QUANTUM,
         )
 
     def _allocated(self, device_alloc: Any) -> Decimal:
@@ -247,26 +255,47 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
 
     # ---- container creation ----
 
-    def _pick(self) -> tuple[str, int]:
-        """The lendable GPU for a new spot session and its memory cap in bytes (SPEC 2.12)."""
+    def _pick(self, share: float) -> tuple[str, int]:
+        """The GPU for a new spot session with `share` and its memory cap in bytes (SPEC 2.12)."""
         now = time.time()
-        handed = {u: t for u, t in (self._handed_out or {}).items() if now - t < RESERVE_SECONDS}
+        handed = [h for h in (self._handed_out or []) if now - h[1] < RESERVE_SECONDS]
+        taken: dict[str, float] = {}
+        for uuid, _t, sh in handed:
+            taken[uuid] = taken.get(uuid, 0.0) + sh
         status = spotstatus.read_status(self.spot_status_path, now, self.spot_status_max_age)
-        picked = spotstatus.pick_spot_gpu([g.uuid for g in self._gpus or []], status, handed)
-        if picked is None:
-            # The manager only schedules while there is room, so this is a race; the monitor
-            # will move or evict the session. Cap it hard meanwhile.
-            log.warning("[%s] no lendable GPU for a new spot session", self.entry_name)
-            picked = ((self._gpus or [])[0].uuid, 0)
-        handed[picked[0]] = now
+        uuids = [g.uuid for g in self._gpus or []]
+        picked = spotstatus.pick_spot_gpu(uuids, status, share, taken)
+        if picked is not None:
+            uuid, capacity = picked
+            cap = int(capacity * share)
+        else:
+            fallback = spotstatus.roomiest_spot_gpu(uuids, status, taken)
+            if fallback is not None:
+                # Fragmented: the manager saw enough share in total, but no single GPU has it.
+                uuid, capacity, left = fallback
+                cap = int(capacity * left)
+                log.warning(
+                    "[%s] no GPU has room for share %.2f; placed on %s with %.2f of it until the monitor moves it",
+                    self.entry_name, share, uuid, left,
+                )
+            else:
+                # The manager only schedules while there is room, so this is a race; the monitor
+                # will move or park the session. Cap it hard meanwhile.
+                log.warning("[%s] no lendable GPU for a new spot session", self.entry_name)
+                uuid, cap = (uuids[0] if uuids else ""), 0
+        handed.append((uuid, now, share))
         self._handed_out = handed
-        return picked
+        return uuid, cap
 
     async def generate_docker_args(self, docker: Any, device_alloc: Any) -> Mapping[str, Any]:
         if not self.enabled or self._allocated(device_alloc) <= 0:
             return {}
         gpus = self._gpus or []
-        chosen, lendable = await asyncio.to_thread(self._pick)
+        share = float(self._allocated(device_alloc))
+        if share > 1:
+            log.warning("[%s] spot share %.2f is over one GPU; capped at 1 (SPEC 2.12)", self.entry_name, share)
+            share = 1.0
+        chosen, cap = await asyncio.to_thread(self._pick, share)
         # Programs see only the chosen GPU (cuda:0), so they cannot touch the others at all; the
         # others stay attached because cuda-checkpoint moves a process only to an attached GPU,
         # visible to it or not (SPEC 2.12, checked on the lab servers).
@@ -275,6 +304,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             ENV_SPOT: "1",
             ENV_SPOT_UUIDS: ",".join(g.uuid for g in gpus),
             ENV_SPOT_GPU: chosen,
+            ENV_SPOT_SHARE: f"{share:g}",
             "CUDA_VISIBLE_DEVICES": chosen,
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
             # SPEC 2.12: the out-of-memory error for a session that cannot be moved.
@@ -284,7 +314,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         }
         for i, uuid in enumerate(order):
             env[f"CUDA_DEVICE_MEMORY_LIMIT_{i}"] = (
-                f"{max(lendable // MiB, 1)}m" if uuid == chosen else BLOCKED_LIMIT
+                f"{max(cap // MiB, 1)}m" if uuid == chosen else BLOCKED_LIMIT
             )
         args: dict[str, Any] = {"Env": [f"{k}={v}" for k, v in env.items()]}
         if not self.is_fake:
@@ -364,9 +394,9 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         return {
             "slot_name": str(self.slot),
             "human_readable_name": self.display_name or f"{base} Spot",
-            "description": "Spot GPU (lent while the owner is idle)",
+            "description": "Spot GPU share (lent while the owner is idle)",
             "display_unit": self.display_unit or f"{base}-SPOT",
-            "number_format": {"binary": False, "round_length": 0},
+            "number_format": {"binary": False, "round_length": 2},
             "display_icon": "gpu1",
         }
 

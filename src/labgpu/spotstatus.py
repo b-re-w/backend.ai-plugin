@@ -25,6 +25,8 @@ class GpuLending:
     since: float | None
     state: str = ""
     lendable_memory: int = 0  # bytes a spot session may use on this GPU right now
+    spot_share: float = 0.0  # total share of the spot sessions on it (0..1)
+    spot_capacity: int = 0  # bytes all spot sessions on it may use together (SPEC 2.9.1)
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,8 @@ def parse_status(text: str, now: float, max_age: float = DEFAULT_MAX_AGE) -> dic
             since=float(since) if since else None,
             state=str(g.get("state", "")) if spot_on else "",
             lendable_memory=int(g.get("lendable_memory") or 0),
+            spot_share=float(g.get("spot_share") or (1.0 if g.get("lent_job") else 0.0)),
+            spot_capacity=int(g.get("spot_capacity") or g.get("lendable_memory") or 0),
         )
     return result
 
@@ -98,21 +102,48 @@ def spot_capacity(own_uuids: Collection[str], status: Mapping[str, GpuLending] |
     return sum(1 for u in own_uuids if u in status and status[u].state in SPOT_STATES)
 
 
+def _rooms(
+    own_uuids: Iterable[str], status: Mapping[str, GpuLending], taken: Mapping[str, float]
+) -> list[tuple[str, float, int]]:
+    """(uuid, share left, spot capacity) for every GPU that can host spot sessions now."""
+    return [
+        (u, 1.0 - status[u].spot_share - taken.get(u, 0.0), status[u].spot_capacity)
+        for u in own_uuids
+        if u in status and status[u].state in SPOT_STATES
+    ]
+
+
 def pick_spot_gpu(
-    own_uuids: Iterable[str], status: Mapping[str, GpuLending] | None, taken: Collection[str] = ()
+    own_uuids: Iterable[str],
+    status: Mapping[str, GpuLending] | None,
+    share: float = 1.0,
+    taken: Mapping[str, float] | None = None,
 ) -> tuple[str, int] | None:
     """
-    The GPU a new spot session gets (SPEC 2.12): LENDABLE, not lent, not just handed out
-    (`taken`), with the most lendable memory. Returns (uuid, lendable bytes) or None.
+    The GPU a new spot session with `share` gets (SPEC 2.12): LENDABLE or LENT with room for the
+    share (after `taken`, shares this plugin just handed out), the one left fullest, ties to the
+    larger spot capacity. Returns (uuid, spot capacity in bytes) or None when nothing fits.
     """
     if status is None:
         return None
-    candidates = [
-        (u, status[u].lendable_memory)
-        for u in own_uuids
-        if u in status and status[u].state == "LENDABLE" and not status[u].lent and u not in taken
-    ]
-    return max(candidates, key=lambda c: c[1]) if candidates else None
+    fits = [r for r in _rooms(own_uuids, status, taken or {}) if r[1] + 1e-6 >= share]
+    if not fits:
+        return None
+    u, _left, capacity = min(fits, key=lambda r: (r[1] - share, -r[2]))
+    return u, capacity
+
+
+def roomiest_spot_gpu(
+    own_uuids: Iterable[str], status: Mapping[str, GpuLending] | None, taken: Mapping[str, float] | None = None
+) -> tuple[str, int, float] | None:
+    """When no GPU fits the share (fragmented): the GPU with the most share left, its capacity and room."""
+    if status is None:
+        return None
+    rooms = [r for r in _rooms(own_uuids, status, taken or {}) if r[1] > 1e-6]
+    if not rooms:
+        return None
+    u, left, capacity = max(rooms, key=lambda r: (r[1], r[2]))
+    return u, capacity, left
 
 
 def uuids_from_env(env: Iterable[str]) -> list[str]:

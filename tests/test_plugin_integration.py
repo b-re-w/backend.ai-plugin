@@ -256,7 +256,7 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     spot = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
                        spot_status_path=str(status), monitor_enabled="false")
     assert owner.enabled and spot.enabled  # the spot plugin claims no GPU
-    slot = SlotName("pro6000-spot.device")
+    slot = SlotName("pro6000-spot.shares")
     assert asyncio.run(spot.available_slots()) == {slot: Decimal(0)}  # no status yet: no room
     status.write_text(json.dumps({"updated_at": time.time(), "gpus": [
         {"uuid": "GPU-p6000-1", "state": "BUSY"},
@@ -268,14 +268,14 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert pool.device_id == POOL_DEVICE_ID and pool.device_name == "pro6000-spot"
     # The allocation map is sized for every GPU of the model; the manager enforces the live count.
     amap = asyncio.run(spot.create_alloc_map())
-    alloc = amap.allocate({slot: Decimal(1)})
+    alloc = amap.allocate({slot: Decimal("0.5")})  # half of one GPU (SPEC 2.12)
     env = env_of(asyncio.run(spot.generate_docker_args(None, alloc)))
-    assert env["LABGPU_SPOT"] == "1"
+    assert env["LABGPU_SPOT"] == "1" and env["LABGPU_SPOT_SHARE"] == "0.5"
     assert env["LABGPU_SPOT_UUIDS"] == "GPU-p6000-1,GPU-p6000-2"
-    # The lendable GPU is cuda:0 with its lendable memory; the other one is capped at 1 MiB.
+    # The lendable GPU is cuda:0 with half its spot capacity; the other one is capped at 1 MiB.
     assert env["LABGPU_SPOT_GPU"] == "GPU-p6000-2"
     assert env["CUDA_VISIBLE_DEVICES"] == "GPU-p6000-2"  # only the chosen GPU
-    assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "81920m"
+    assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "40960m"
     assert env["CUDA_DEVICE_MEMORY_LIMIT_1"] == "1m"
     assert asyncio.run(spot.get_hooks("ubuntu22.04", "x86_64")) == [fake_primary]
     # cuda-checkpoint goes into the container read-only for the monitor's `docker exec` (SPEC 2.13).
@@ -290,6 +290,7 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert env["PYTHONPATH"] == "/opt/labgpu/python" and env["LABGPU_SPOT_OOM_SIGNAL"] == "44"
     assert asyncio.run(spot.generate_mounts(tmp_path, {})) == []
     meta = spot.get_metadata()
-    assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"
+    assert meta["slot_name"] == "pro6000-spot.shares" and meta["display_unit"] == "PRO6000-SPOT"
+    assert meta["number_format"]["round_length"] == 2
     assert meta["human_readable_name"] == "PRO6000 Spot"
     assert asyncio.run(spot.generate_docker_args(None, {})) == {}

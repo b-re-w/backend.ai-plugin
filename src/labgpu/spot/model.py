@@ -84,3 +84,6 @@ class GpuVerdict:
     lendable_memory: int = 0  # free bytes a spot session could use
     idle_for: float = 0.0
     model: str = ""
+    # Memory all spot sessions on this GPU may use together (total - non-spot use - reserve),
+    # for LENDABLE and LENT GPUs; a session with share s gets s times this (SPEC 2.12).
+    spot_capacity: int = 0

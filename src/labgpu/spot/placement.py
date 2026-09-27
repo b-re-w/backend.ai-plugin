@@ -2,9 +2,12 @@
 Where each spot session should run (SPEC 2.12). Pure: no NVML, Docker, or cuda-checkpoint.
 
 Rules:
-- A spot session runs on at most one GPU, and a GPU hosts at most one spot session.
+- A spot session runs on at most one GPU, with a share of it (0 < share <= 1). A GPU hosts spot
+  sessions up to a total share of 1; over that, the latest arrivals leave.
 - It may stay only on a GPU whose verdict is LENT without `must_reclaim`.
-- Otherwise it moves to a LENDABLE GPU of the same model among the GPUs attached to it.
+- Otherwise it moves to a GPU of the same model among the GPUs attached to it that is LENDABLE or
+  LENT without `must_reclaim` and has room for its share (the fullest one that fits, so whole GPUs
+  stay free for larger shares).
 - With no such GPU (user decision, nothing is ever killed):
   - a program that installed the out-of-memory handler gets torch.OutOfMemoryError right away
     (`Oom`: its GPU memory limit drops to 1 MiB and a signal raises the error). If it is still on
@@ -30,6 +33,7 @@ class RunningSpot:
     since: float  # when the monitor first saw it on its current GPU
     oom_ready: bool = True  # at least one process has the out-of-memory signal handler installed
     assigned: str | None = None  # the GPU this session was given (None: not known)
+    share: float = 1.0  # its share of one GPU
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class ParkedSpot:
     src: str  # GPU it was checkpointed from
     allowed: tuple[str, ...]
     since: float  # when it was parked
+    share: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -98,40 +103,47 @@ def plan(
     """
     oomed = oomed or {}
     actions: list[Action] = []
-    taken: set[str] = set()  # GPUs promised to a spot this tick
+    eps = 1e-6
 
-    # Keep the longest-running spot on each GPU; later arrivals on the same GPU must leave.
-    keep_on: dict[str, RunningSpot] = {}
+    # Share already on each GPU, oldest sessions first; a session that would push a GPU over a
+    # total of 1 is "over" and must leave (e.g. two sessions placed at the same time).
+    used: dict[str, float] = {}
+    over: set[str] = set()
     for s in sorted(running, key=lambda s: s.since):
         if len(s.gpus) == 1:
             g = next(iter(s.gpus))
-            keep_on.setdefault(g, s)
-    occupied = {g for s in running for g in s.gpus}
+            if used.get(g, 0.0) + s.share > 1 + eps:
+                over.add(s.container_id)
+            else:
+                used[g] = used.get(g, 0.0) + s.share
 
-    def target(src: str, allowed: Sequence[str], *, may_return: bool = False) -> str | None:
-        """A free LENDABLE GPU of src's model; a parked spot may go back to src itself."""
+    def room(u: str) -> float:
+        return 1.0 - used.get(u, 0.0)
+
+    def target(src: str, allowed: Sequence[str], share: float, *, may_return: bool = False) -> str | None:
+        """The fullest GPU of src's model with room for `share`; a parked spot may go back to src."""
         model = verdicts[src].model if src in verdicts else None
         candidates = [
             verdicts[u]
             for u in allowed
             if u in verdicts
             and (u != src or may_return)
-            and u not in taken
-            and u not in occupied
-            and verdicts[u].state is GpuState.LENDABLE
+            and (verdicts[u].state is GpuState.LENDABLE
+                 or (verdicts[u].state is GpuState.LENT and not verdicts[u].must_reclaim))
             and (model is None or verdicts[u].model == model)
+            and room(u) + eps >= share
         ]
         if not candidates:
             return None
-        best = max(candidates, key=lambda v: v.lendable_memory)
-        taken.add(best.uuid)
+        best = min(candidates, key=lambda v: (room(v.uuid) - share, -(v.spot_capacity or v.lendable_memory)))
+        used[best.uuid] = used.get(best.uuid, 0.0) + share  # promised this tick
         return best.uuid
 
     running_ids = {s.container_id for s in running}
     for p in sorted(parked, key=lambda p: p.since):
         if p.container_id in busy or p.container_id in running_ids:
             continue  # partly parked: restore once all its processes are off the GPU
-        dst = target(p.src, p.allowed, may_return=True)
+        dst = target(p.src, p.allowed, p.share, may_return=True)
         if dst is not None:
             actions.append(Restore(p.container_id, p.src, dst))
 
@@ -148,15 +160,15 @@ def plan(
         v = verdicts.get(src)
         if len(s.gpus) != 1:
             reason = f"uses {len(s.gpus)} GPUs; spot allows one"
-        elif keep_on.get(src) is not s:
-            reason = "another spot session is on this GPU"
+        elif s.container_id in over:
+            reason = "spot sessions on this GPU exceed one GPU in total"
         elif v is None:
             reason = "GPU not observed"
         elif v.state is GpuState.LENT and not v.must_reclaim:
             continue
         else:
             reason = "; ".join(v.reasons) or f"GPU is {v.state}"
-        dst = target(src, s.allowed) if len(s.gpus) == 1 else None
+        dst = target(src, s.allowed, s.share) if len(s.gpus) == 1 else None
         last = oomed.get(s.container_id)
         parkable = can_checkpoint and len(s.gpus) == 1
         if dst is not None:

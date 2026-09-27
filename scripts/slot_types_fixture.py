@@ -6,7 +6,7 @@ table: an agent reporting a slot missing there makes every heartbeat fail with a
 The manager has no API to add rows; `backend.ai mgr fixture populate <file>` is the supported way.
 
 usage: slot_types_fixture.py SLOT:DISPLAY_NAME:DISPLAY_UNIT[:ROUND] ... > slot-types.json
-  e.g. cuda-pro6000.shares:"PRO 6000":PRO6000:2 cuda-pro6000-spot.device:"PRO 6000 Spot":PRO6000-SPOT:0
+  e.g. cuda-pro6000.shares:"PRO 6000":PRO6000:2 cuda-pro6000-spot.shares:"PRO 6000 Spot":PRO6000-SPOT:2
 """
 
 import json

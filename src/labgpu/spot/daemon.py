@@ -57,7 +57,9 @@ class ParkedRecord:
 
     @classmethod
     def from_json(cls, d: dict) -> ParkedRecord:
-        spot = ParkedSpot(d["container_id"], d["src"], tuple(d["allowed"]), float(d["since"]))
+        spot = ParkedSpot(
+            d["container_id"], d["src"], tuple(d["allowed"]), float(d["since"]), float(d.get("share", 1.0))
+        )
         return cls(spot, tuple(int(p) for p in d["pids"]), int(d["memory"]), bool(d.get("hold")))
 
 
@@ -235,9 +237,14 @@ class Controller:
                 min(self.spot_seen[(cid, g)] for g in gs),
                 oom_ready=any(self.handler_check(pid) for pid in self._pids_on(cid, None)),
                 assigned=self.assigned.get(cid),
+                share=self._share(cid),
             )
             for cid, gs in gpus_of.items()
         ]
+
+    def _share(self, cid: str) -> float:
+        info = self.spot_info.get(cid)
+        return info.share if info is not None else 1.0
 
     def _pids_on(self, cid: str, gpu: str | None) -> tuple[int, ...]:
         # A process with contexts on two GPUs is listed once.
@@ -316,9 +323,11 @@ class Controller:
             others = [u for u in s.uuids if u != gpu]
             self._submit(Gate(s.id, gpu), lambda s=s, allow=allow, others=others: self._gate(s.id, allow, others), None, None)
 
-    def _lendable(self, uuid: str) -> int:
+    def _cap(self, cid: str, uuid: str) -> int:
+        """Memory limit for a session on `uuid`: its share of the GPU's spot capacity (SPEC 2.12)."""
         v = self.last_verdicts.get(uuid)
-        return v.lendable_memory if v is not None else 0
+        capacity = (v.spot_capacity or v.lendable_memory) if v is not None else 0
+        return int(capacity * self._share(cid))
 
     def _dispatch(self, action: Action, now: float) -> None:
         cid = action.container_id
@@ -327,7 +336,7 @@ class Controller:
         match action:
             case Move(_, src, dst, reason):
                 pids = self._pids_on(cid, src)
-                size = self._lendable(dst)
+                size = self._cap(cid, dst)
                 log.info("spot %s: move %s -> %s (%s) pids=%s", cid[:12], src, dst, reason, pids)
 
                 def job() -> None:
@@ -340,7 +349,9 @@ class Controller:
                 fallback = self._oom_job(cid, pids, self._order(visible, src), reason)
             case Park(_, src, reason):
                 pids = self._pids_on(cid, src)
-                record = ParkedRecord(ParkedSpot(cid, src, visible, now), pids, self._mem_on(cid, src))
+                record = ParkedRecord(
+                    ParkedSpot(cid, src, visible, now, self._share(cid)), pids, self._mem_on(cid, src)
+                )
                 log.info("spot %s: park off %s (%s) pids=%s", cid[:12], src, reason, pids)
 
                 def park_job() -> None:
@@ -355,7 +366,7 @@ class Controller:
                 return
             case Restore(_, src, dst):
                 record = self.parked[cid]
-                size = self._lendable(dst)
+                size = int((self.last_verdicts[dst].spot_capacity if dst in self.last_verdicts else 0) * record.spot.share)
                 log.info("spot %s: restore parked %s -> %s", cid[:12], src, dst)
 
                 def job() -> None:
@@ -370,7 +381,8 @@ class Controller:
                 pids = tuple(dict.fromkeys(p for g in gpus for p in self._pids_on(cid, g)))
                 log.warning("spot %s: %s; parking pids=%s and holding them", cid[:12], reason, pids)
                 record = ParkedRecord(
-                    ParkedSpot(cid, gpus[0], visible, now), pids, sum(self._mem_on(cid, g) for g in gpus), hold=True
+                    ParkedSpot(cid, gpus[0], visible, now, self._share(cid)), pids,
+                    sum(self._mem_on(cid, g) for g in gpus), hold=True,
                 )
                 home = self.assigned.get(cid, "")
 
@@ -393,7 +405,7 @@ class Controller:
                 )
                 oom = self._oom_job(cid, ready or pids, self._order(visible, gpu), reason)
                 record = (
-                    ParkedRecord(ParkedSpot(cid, gpu, visible, now), silent, self._mem_on(cid, gpu))
+                    ParkedRecord(ParkedSpot(cid, gpu, visible, now, self._share(cid)), silent, self._mem_on(cid, gpu))
                     if silent
                     else None
                 )
@@ -510,6 +522,8 @@ class Controller:
                 "state": str(v.state),
                 "lent_job": spots[0][:12] if spots else None,
                 "lent_since": since,
+                "spots": [{"container": c[:12], "share": self._share(c)} for c in spots],
+                "spot_share": round(sum(self._share(c) for c in spots), 4),
             })
         status = {
             "updated_at": now,

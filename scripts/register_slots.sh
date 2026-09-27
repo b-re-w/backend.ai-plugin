@@ -47,7 +47,8 @@ slot gpu_slot_2 cuda-pro5000-72 "*PRO 5000*" "PRO 5000 72GB" PRO5000-72 60g
 slot gpu_slot_3 cuda-pro5000  "*PRO 5000*" "PRO 5000"      PRO5000    "" 60g
 slot gpu_slot_4 cuda-a6000    "*A6000*"    "A6000"         A6000
 
-# Spot launch mode (SPEC 2.12): one gpu_spot_N per model, same GPU selection as its owner slot.
+# Spot launch mode (SPEC 2.12): one gpu_spot_N per model, same GPU selection as its owner slot;
+# the slot is a fractional share of one GPU (<key>.shares).
 spot() {  # spot <entry> <key> <pattern> <display unit> <display name> [min_memory] [max_memory]
   $BAI mgr etcd put "$P/$1/key" "$2"
   $BAI mgr etcd put "$P/$1/model_pattern" "$3"
@@ -55,9 +56,11 @@ spot() {  # spot <entry> <key> <pattern> <display unit> <display name> [min_memo
   $BAI mgr etcd put "$P/$1/display_name" "$5"
   [ -n "${6:-}" ] && $BAI mgr etcd put "$P/$1/min_memory" "$6"
   [ -n "${7:-}" ] && $BAI mgr etcd put "$P/$1/max_memory" "$7"
-  $BAI mgr etcd put "config/resource_slots/$2.device" count
+  # A share of one GPU, fractional like the owner slots (SPEC 2.12); drop the old whole-GPU slot.
+  $BAI mgr etcd put "config/resource_slots/$2.shares" count
+  $BAI mgr etcd delete "config/resource_slots/$2.device" >/dev/null 2>&1 || true
   SLOT_TYPES="$SLOT_TYPES
-$2.device:$5:$4"
+$2.shares:$5:$4"
 }
 
 spot gpu_spot_1 cuda-pro6000-spot    "*PRO 6000*" PRO6000-SPOT    "PRO 6000 Spot"

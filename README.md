@@ -109,7 +109,7 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 사용량 통계에 그대로 보입니다. 동작 규칙은 [SPEC 2.12](docs/SPEC.md)를 보세요.
 
 **매니저에서 한 번:** [scripts/register_slots.sh](scripts/register_slots.sh)가 종류별 슬롯과 함께
-스팟 플러그인(`gpu_spot_1~4`, key `cuda-pro6000-spot` 등)과 슬롯(`cuda-pro6000-spot.device`)을 등록합니다.
+스팟 플러그인(`gpu_spot_1~4`, key `cuda-pro6000-spot` 등)과 슬롯(`cuda-pro6000-spot.shares`, GPU 한 장에 대한 몫)을 등록합니다.
 agent의 `allocation-order`에 스팟 key도 넣어야 합니다. key가 `cuda-`로 시작하므로 이미지는 고치지 않아도 됩니다.
 
 **GPU 노드마다:**
@@ -129,7 +129,9 @@ agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 
 
 ### 스팟 세션을 쓰는 사람이 알아 둘 것
 
-- 세션 런처의 AI 가속기 종류에서 `…-SPOT`을 고르고 1개를 요청합니다. 빈자리가 없으면 세션은 대기합니다.
+- 세션 런처의 AI 가속기 종류에서 `…-SPOT`을 고르고 GPU 한 장에 대한 몫을 요청합니다(예: 0.5, 최대 1). 여러 스팟
+  세션이 GPU 한 장을 몫만큼 나눠 쓰며, 메모리 상한은 `몫 × 그 GPU에서 빌려줄 수 있는 메모리`입니다. 빈자리가 없으면
+  세션은 대기합니다.
 - 받은 GPU는 `cuda:0`입니다. 같은 종류의 다른 GPU도 보이지만 메모리가 1MB로 막혀 있어 쓸 수 없습니다.
 - 주인이 돌아오면 프로그램은 몇 초 멈췄다가 다른 GPU에서 **그대로 이어서** 돕니다. 오류는 없습니다.
 - 옮길 GPU가 없으면 프로그램에 **바로 `torch.OutOfMemoryError`가 납니다.** 강제로 죽이지 않습니다.

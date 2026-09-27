@@ -8,7 +8,7 @@
 | 구성 요소 | 어디서 도나 | 하는 일 |
 |---|---|---|
 | `cuda_frac` 가속기 플러그인 (`labgpu.accelerator`) | 각 GPU 노드의 Backend.AI **agent** 프로세스 안 | GPU를 `cuda.shares`(소수) 단위로 할당하고, HAMi-core로 컨테이너별 GPU 메모리·SM 사용률을 제한합니다. |
-| `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`cuda-pro6000-spot.device` 등)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
+| `gpu_spot_N` 스팟 플러그인 (`labgpu.accelerator.spot_plugin`) | agent 프로세스 안 | GPU 종류별 스팟 슬롯(`cuda-pro6000-spot.shares` 등, 소수 가능)을 빌려줄 수 있는 GPU 수만큼 냅니다(2.12). |
 | `labgpu-spot` 감시기 (`labgpu.spot`) | 각 GPU 노드의 agent 프로세스 안 백그라운드 스레드 (root, 2.13) | 소유자가 안 쓰는 GPU를 판정해 현황 파일에 쓰고, 스팟 세션을 옮기거나 멈춰 두거나 내보냅니다(2장). |
 | 공용 모듈 (`labgpu.fraction`, `labgpu.nvml`, `labgpu.procmap`, `labgpu.devalloc`) | 둘 다 | 할당량 계산, NVML 조회, PID→컨테이너 매핑. |
 
@@ -339,13 +339,17 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 {"updated_at": 1790000000.0, "spot_enabled": true, "can_move": true,
  "gpus": [{"uuid": "GPU-...", "state": "LENT", "lendable": false, "must_reclaim": false,
            "reasons": [], "lendable_memory": 0, "idle_for": 7800.0, "model": "NVIDIA RTX PRO 6000 ...",
-           "lent_job": "3f2a9c1b7d4e", "lent_since": 1789992200.0}],
+           "lent_job": "3f2a9c1b7d4e", "lent_since": 1789992200.0,
+           "spots": [{"container": "3f2a9c1b7d4e", "share": 0.5}], "spot_share": 0.5,
+           "spot_capacity": 99807657984}],
  "parked": [{"container": "8f77fe432325", "from": "GPU-...", "since": 1790000000.0}],
  "busy": {"8f77fe432325": "Move"}}
 ```
 
-- `lent_job`: 그 GPU 위 스팟 세션 컨테이너 ID 앞 12자리, 없으면 `null`. `lent_since`: 그 스팟을 이 GPU에서
+- `lent_job`: 그 GPU 위 첫 스팟 세션 컨테이너 ID 앞 12자리, 없으면 `null`. `lent_since`: 그 GPU에서 스팟을
   처음 본 시각.
+- `spots`: 그 GPU 위 스팟 세션 전부와 각자의 몫. `spot_share`: 몫의 합(0~1). `spot_capacity`: 스팟 전체가 쓸 수 있는
+  메모리(전체 - 스팟을 뺀 사용량 - `mem_reserve_mib`, 바이트). 스팟 플러그인이 새 세션의 GPU와 메모리 상한을 정할 때 씁니다.
 - `spot_enabled`가 `false`면 스팟 플러그인은 자리를 0으로 봅니다. `can_move`는 cuda-checkpoint를 쓸 수 있는지.
 
 ### 2.10 재시작
@@ -362,8 +366,10 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 **Backend.AI 쪽 (`gpu_spot_1..4` 플러그인, `labgpu.accelerator.spot_plugin`)**
 
-- 각 플러그인은 GPU 종류 하나를 맡아 `<key>.device` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
-  `cuda-pro6000-spot.device`). 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
+- 각 플러그인은 GPU 종류 하나를 맡아 `<key>.shares` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
+  `cuda-pro6000-spot.shares`). **소수로 요청할 수 있습니다**(사용자 결정, 0.01 단위). 세션 하나가 받는 양 `s`는
+  GPU 한 장에 대한 몫이며 1 이하여야 합니다(한 세션은 GPU 한 장 안에서만 돕니다). GPU 한 장에는 몫의 합이 1이 될
+  때까지 스팟 세션이 여럿 들어갑니다. 슬롯 이름이 `.shares`로 끝나야 WebUI 세션 런처가 소수 입력을 허용합니다. 설정 키: `key`(필수), `model_pattern`, `min_memory`, `max_memory`,
   `device_mask`(1.2와 같은 GPU 선택), `display_name`, `display_unit`, `spot_status_path`, `spot_status_max_age`,
   `monitor_enabled`(기본 `true`, 2.13), `monitor/<구역>/<키>`(감시기 설정, 2.2).
 - 표시 이름은 `display_name`, `display_unit`으로 정합니다(`scripts/register_slots.sh`는 주인 슬롯 이름 + " Spot",
@@ -372,19 +378,28 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   것이든 쓰므로, 그 GPU가 없는 노드도 같은 이름을 보고해야 합니다.
   설정하지 않은 `gpu_spot_N`은 건너뜁니다.
 - GPU를 차지하지 않습니다(1.11의 중복 점유 검사 대상 아님). 같은 GPU를 주인 쪽 플러그인이 그대로 갖습니다.
-- 장치는 종류마다 가상 장치 하나(`spot`)입니다. agent는 할당 맵을 시작할 때 한 번만 만들기 때문에
-  할당 맵 용량은 그 종류 GPU 수로 둡니다. 대신 `available_slots`가 **지금 LENDABLE이거나 LENT인 그 종류
-  GPU 수**를 보고하고(현황 파일, 없거나 오래됐으면 0), agent가 30초마다 이를 매니저에 다시 알리므로
-  매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은 대기(PENDING)합니다.
-- **GPU 고르기와 메모리 제한.** 새 스팟 세션이 쓸 GPU는 플러그인이 고릅니다. 현황 파일에서 LENDABLE이고
-  스팟이 없으며 최근 120초 안에 다른 세션에 주지 않은 GPU 중 빌려줄 수 있는 메모리가 가장 큰 것입니다.
+- 장치는 종류마다 가상 장치 하나(`spot`)이고 할당 맵은 소수 할당(`FractionAllocMap`, 양자 0.01)입니다. agent는
+  할당 맵을 시작할 때 한 번만 만들기 때문에 할당 맵 용량은 그 종류 GPU 수로 둡니다. 대신 `available_slots`가
+  **지금 LENDABLE이거나 LENT인 그 종류 GPU 수**(GPU 한 장 = 1)를 보고하고(현황 파일, 없거나 오래됐으면 0), agent가
+  30초마다 이를 매니저에 다시 알리므로 매니저는 빈자리가 있을 때만 스팟 세션을 배정합니다. 자리가 없으면 세션은
+  대기(PENDING)합니다.
+  - 한계: 매니저는 합계만 보므로, 두 GPU에 0.6씩 차 있으면 합계로는 0.8이 남아도 0.8짜리 세션이 들어갈 GPU는
+    없습니다(조각남). 이때 플러그인은 몫이 가장 많이 남은 GPU에 두되 메모리 상한은 그 GPU에 남은 몫만큼만 주고
+    WARNING을 남깁니다. 감시기가 자리가 나는 대로 옮기며, 그 전에는 요청보다 적은 메모리로 돕니다.
+- **GPU 고르기와 메모리 제한.** 새 스팟 세션이 쓸 GPU는 플러그인이 고릅니다. 현황 파일에서 LENDABLE이거나
+  회수 조건 없이 LENT인 GPU 가운데, 남은 몫(1 - 이미 올라간 스팟 몫의 합 - 최근 120초 안에 이 플러그인이 새 세션에
+  준 몫)이 `s` 이상인 것 중 **남는 몫이 가장 적어지는 것**(같으면 스팟 용량이 큰 것)입니다. 한 GPU를 먼저 채워
+  다른 GPU는 통째로 남기려는 것입니다.
+  - 스팟 용량(`spot_capacity`)은 그 GPU에서 스팟 전체가 쓸 수 있는 메모리입니다: 전체 - 스팟을 뺀 사용량 -
+    `mem_reserve_mib`(감시기가 매 틱 계산해 현황 파일에 씀).
   - 프로그램에는 **그 GPU 하나만** 보이게 합니다(`CUDA_VISIBLE_DEVICES=<고른 GPU>`, 프로그램의 `cuda:0`). HAMi-core로
-    메모리를 그 GPU의 빌려줄 수 있는 메모리(`lendable_memory`)로 제한합니다(`CUDA_DEVICE_MEMORY_LIMIT_0`).
-    다른 GPU는 CUDA에 보이지 않으므로 컨텍스트조차 만들 수 없습니다.
+    메모리를 `s × 스팟 용량`으로 제한합니다(`CUDA_DEVICE_MEMORY_LIMIT_0`). 다른 GPU는 CUDA에 보이지 않으므로
+    컨텍스트조차 만들 수 없습니다.
   - 같은 종류의 **나머지 GPU도 컨테이너에는 붙입니다.** cuda-checkpoint는 컨테이너에 붙은 GPU라면 프로세스의
     `CUDA_VISIBLE_DEVICES`에 없어도 그리로 옮길 수 있습니다(2026-09-27 Primary 실측). `CUDA_DEVICE_MEMORY_LIMIT_1..`은
     1MiB로 둡니다(`nvidia-smi` 표시용, 2.12 규칙 6 참고).
-  - 환경변수: `LABGPU_SPOT=1`, `LABGPU_SPOT_UUIDS`(붙인 GPU 전체), `LABGPU_SPOT_GPU`(고른 GPU).
+  - 환경변수: `LABGPU_SPOT=1`, `LABGPU_SPOT_UUIDS`(붙인 GPU 전체), `LABGPU_SPOT_GPU`(고른 GPU),
+    `LABGPU_SPOT_SHARE`(받은 몫 `s`, 감시기가 자리 계산에 씀).
     `DeviceRequests`에는 NVML 인덱스로 넣습니다.
   - HAMi-core(`hook_path`, 기본 `<체크아웃>/.venv/lib/libvgpu.so`)가 없으면 메모리를 제한할 수 없으므로
     ERROR를 남기고 스팟 플러그인을 끕니다(스팟 자리 0). 주인 우선 원칙입니다.
@@ -404,11 +419,14 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 
 규칙:
 
-1. 스팟 세션 하나는 GPU 하나에서만, GPU 하나에는 스팟 세션 하나만 돕니다.
+1. 스팟 세션 하나는 GPU 하나에서만 돕니다. GPU 하나에는 몫(`LABGPU_SPOT_SHARE`, 없으면 1)의 합이 1 이하인 만큼
+   스팟 세션이 여럿 돕니다.
 2. 스팟은 LENT이면서 회수 조건이 없는 GPU에만 머뭅니다. 처음에는 CUDA 기본 장치(보통 첫 GPU)에서
-   시작하므로, 그 GPU가 빌려줄 수 없는 상태면 바로 옮깁니다. 같은 GPU에 스팟이 둘이면 나중에 온 쪽이 옮깁니다.
-3. **옮기기(Move)**: 붙어 있는 GPU 중 같은 모델이면서 LENDABLE이고 스팟이 없는 GPU(빌려줄 수 있는 메모리가
-   가장 큰 것)로 옮깁니다. `cuda-checkpoint --action lock → checkpoint → restore --device-map → unlock`을
+   시작하므로, 그 GPU가 빌려줄 수 없는 상태면 바로 옮깁니다. 한 GPU에서 몫의 합이 1을 넘으면 먼저 온 순서로
+   1까지 남기고 나중에 온 쪽이 옮깁니다. 주인이 돌아오면 그 GPU의 스팟은 **세션마다 따로** 3~5를 따릅니다.
+3. **옮기기(Move)**: 붙어 있는 GPU 중 같은 모델이면서 LENDABLE이거나 회수 조건 없이 LENT이고, 남은 몫이 그 세션의
+   몫 이상인 GPU로 옮깁니다(남는 몫이 가장 적어지는 것, 같으면 스팟 용량이 큰 것). 이번 틱에 다른 스팟에 약속한
+   몫도 뺍니다. `cuda-checkpoint --action lock → checkpoint → restore --device-map → unlock`을
    그 세션의 GPU 프로세스마다 합니다. device-map은 원래 GPU와 대상 GPU를 맞바꾸고 나머지는 그대로 둡니다.
    프로세스는 오류 없이 잠깐 멈췄다가 이어서 돕니다.
 4. **옮길 GPU가 없을 때: 즉시 OOM 오류, 강제 종료 없음**(사용자 결정). `KeyboardInterrupt`(SIGINT)와 KILL은
@@ -429,11 +447,11 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
      `uv run`도 `PYTHONPATH`를 넘기므로 동작합니다(2026-09-27 Primary). 이미지나 사용자가 `PYTHONPATH`를 따로 쓰면
      컨테이너 설정이 이미지 값을 덮어쓰므로, 필요하면 사용자가 뒤에 붙여 써야 합니다.
 5. **멈춰 두기(Park)**: lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는 CUDA 호출에서
-   기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore). 멈춰 둔 스팟은 새로 옮겨야
+   기다립니다. 매 틱 그 세션의 몫이 들어갈 GPU(3과 같은 조건)를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore). 멈춰 둔 스팟은 새로 옮겨야
    하는 스팟보다 먼저 자리를 받습니다. 빈 GPU가 생길 때까지 **기한 없이** 기다립니다.
 6. **옮기거나 되살린 뒤.** 컨테이너 환경변수(`CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_*`)는 처음 값 그대로라,
    그대로 두면 새로 뜨는 프로그램이 **주인에게 돌아간 원래 GPU**를 봅니다. 그래서:
-   - HAMi-core 공유 제한 index 0(모든 프로그램의 `cuda:0`) = 지금 GPU의 빌려줄 수 있는 메모리(MiB 단위), 나머지 = 1MiB.
+   - HAMi-core 공유 제한 index 0(모든 프로그램의 `cuda:0`) = `s × 지금 GPU의 스팟 용량`(MiB 단위), 나머지 = 1MiB.
      옮겨 간 프로세스도 device-map으로 `cuda:0`이 지금 GPU입니다.
    - `/tmp/labgpu-spot-env`에 `CUDA_VISIBLE_DEVICES=<지금 GPU>`와 위 제한을 씁니다(세션 사용자 소유). 새 파이썬
      프로그램은 `sitecustomize`가, 새 셸은 `/etc/profile.d/labgpu-spot.sh`(읽기 전용 마운트, 비대화형 bash는 `BASH_ENV`)가

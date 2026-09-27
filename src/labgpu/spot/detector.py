@@ -63,6 +63,7 @@ class GpuTracker:
 
         idle_for = now - self.last_active
         lendable_memory = max(obs.free_memory - reclaim.mem_reserve, 0)
+        spot_capacity = max(obs.free_memory_without_spot - reclaim.mem_reserve, 0)
 
         if lent:
             reasons = list(activity)
@@ -80,7 +81,9 @@ class GpuTracker:
                 reasons.append(blocked)
             must = bool(reasons) and not reclaiming
             state = GpuState.RECLAIMING if (reclaiming or must) else GpuState.LENT
-            return GpuVerdict(obs.uuid, state, False, must, tuple(reasons), 0, idle_for)
+            return GpuVerdict(
+                obs.uuid, state, False, must, tuple(reasons), 0, idle_for, spot_capacity=spot_capacity
+            )
 
         if activity:
             return GpuVerdict(obs.uuid, GpuState.BUSY, False, False, tuple(activity), 0, idle_for)
@@ -89,7 +92,7 @@ class GpuTracker:
             reasons = (blocked,) if blocked else ()
             return GpuVerdict(obs.uuid, GpuState.IDLE, False, False, reasons, 0, idle_for)
         return GpuVerdict(
-            obs.uuid, GpuState.LENDABLE, True, False, (), lendable_memory, idle_for
+            obs.uuid, GpuState.LENDABLE, True, False, (), lendable_memory, idle_for, spot_capacity=spot_capacity
         )
 
     def _activity_reasons(self, obs: GpuObservation, idle: IdleConfig) -> list[str]:
