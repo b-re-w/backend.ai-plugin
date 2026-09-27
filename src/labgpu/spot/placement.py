@@ -5,8 +5,12 @@ Rules:
 - A spot session runs on at most one GPU, and a GPU hosts at most one spot session.
 - It may stay only on a GPU whose verdict is LENT without `must_reclaim`.
 - Otherwise it moves to a LENDABLE GPU of the same model among the GPUs attached to it.
-- With no such GPU it is parked (checkpointed off the GPU) and waits `park_seconds` for one;
-  after that, or when it cannot be checkpointed at all, it is evicted.
+- With no such GPU (user decision, nothing is ever killed):
+  - a program that installed the out-of-memory handler gets torch.OutOfMemoryError right away
+    (`Oom`: its GPU memory limit drops to 1 MiB and a signal raises the error). If it is still on
+    the GPU `oom_grace` seconds later it is parked, so it never keeps holding the owner's GPU;
+  - any other program is parked at once (checkpointed off the GPU, no error).
+  A parked session is restored when a GPU of its model frees up.
 - Parked sessions get free GPUs before running sessions that must move.
 """
 
@@ -24,6 +28,7 @@ class RunningSpot:
     gpus: frozenset[str]  # GPUs its processes are on right now
     allowed: tuple[str, ...]  # GPUs attached to the container
     since: float  # when the monitor first saw it on its current GPU
+    oom_ready: bool = True  # every process has the out-of-memory signal handler installed
 
 
 @dataclass(frozen=True)
@@ -57,13 +62,13 @@ class Restore:
 
 
 @dataclass(frozen=True)
-class Evict:
+class Oom:
     container_id: str
-    gpu: str | None  # None when parked
+    gpu: str
     reason: str
 
 
-Action = Move | Park | Restore | Evict
+Action = Move | Park | Restore | Oom
 
 
 def plan(
@@ -73,10 +78,15 @@ def plan(
     *,
     now: float,
     can_checkpoint: bool,
-    park_seconds: float,
+    oom_grace: float,
+    oomed: Mapping[str, float] | None = None,
     busy: frozenset[str] = frozenset(),
 ) -> list[Action]:
-    """`busy`: containers with an operation in flight; they are left alone this tick."""
+    """
+    `oomed`: when each container last got the out-of-memory error; `busy`: containers with an
+    operation in flight, left alone this tick.
+    """
+    oomed = oomed or {}
     actions: list[Action] = []
     taken: set[str] = set()  # GPUs promised to a spot this tick
 
@@ -113,18 +123,15 @@ def plan(
         dst = target(p.src, p.allowed, may_return=True)
         if dst is not None:
             actions.append(Restore(p.container_id, p.src, dst))
-        elif now - p.since >= park_seconds:
-            actions.append(Evict(p.container_id, None, f"no free GPU for {park_seconds:.0f}s"))
 
     for s in sorted(running, key=lambda s: s.since):
         if s.container_id in busy:
             continue
-        if len(s.gpus) != 1:
-            actions.append(Evict(s.container_id, None, f"uses {len(s.gpus)} GPUs; spot allows one"))
-            continue
-        src = next(iter(s.gpus))
+        src = sorted(s.gpus)[0]
         v = verdicts.get(src)
-        if keep_on.get(src) is not s:
+        if len(s.gpus) != 1:
+            reason = f"uses {len(s.gpus)} GPUs; spot allows one"
+        elif keep_on.get(src) is not s:
             reason = "another spot session is on this GPU"
         elif v is None:
             reason = "GPU not observed"
@@ -132,11 +139,17 @@ def plan(
             continue
         else:
             reason = "; ".join(v.reasons) or f"GPU is {v.state}"
-        dst = target(src, s.allowed)
+        dst = target(src, s.allowed) if len(s.gpus) == 1 else None
+        last = oomed.get(s.container_id)
+        parkable = can_checkpoint and len(s.gpus) == 1
         if dst is not None:
             actions.append(Move(s.container_id, src, dst, reason))
-        elif can_checkpoint:
-            actions.append(Park(s.container_id, src, reason))
-        else:
-            actions.append(Evict(s.container_id, src, reason))
+        elif parkable and not s.oom_ready:
+            actions.append(Park(s.container_id, src, reason))  # it could not see the error
+        elif last is None:
+            actions.append(Oom(s.container_id, src, reason))
+        elif parkable and now - last >= oom_grace:
+            actions.append(Park(s.container_id, src, reason))  # still holding the GPU
+        elif not parkable and now - last >= oom_grace:
+            actions.append(Oom(s.container_id, src, reason))
     return actions

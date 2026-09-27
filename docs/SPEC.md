@@ -266,9 +266,7 @@ enabled = true               # false면 스팟 자리를 0으로 보고하고, �
 cuda_checkpoint = "..."      # 기본: <플러그인 체크아웃>/.venv/bin/cuda-checkpoint, 없으면 PATH
                              # (scripts/install_cuda_checkpoint.sh가 root 없이 거기에 설치)
 checkpoint_timeout_seconds = 60
-park_seconds = 300           # 옮길 GPU가 없을 때 멈춰 두고 기다리는 시간
-evict_signal = "SIGINT"      # 내보낼 때 프로그램에 내는 오류 (파이썬에서는 KeyboardInterrupt). 강제 종료는 없음
-interrupt_interval_seconds = 30   # 같은 세션에 시그널을 다시 보내기까지 최소 간격
+oom_grace_seconds = 10       # OOM 오류 뒤에도 주인 GPU에 남아 있으면 이만큼 뒤 멈춰 둠
 ```
 
 ### 2.3 관측 (매 틱)
@@ -412,26 +410,32 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
    가장 큰 것)로 옮깁니다. `cuda-checkpoint --action lock → checkpoint → restore --device-map → unlock`을
    그 세션의 GPU 프로세스마다 합니다. device-map은 원래 GPU와 대상 GPU를 맞바꾸고 나머지는 그대로 둡니다.
    프로세스는 오류 없이 잠깐 멈췄다가 이어서 돕니다.
-4. **멈춰 두기(Park)**: 옮길 GPU가 없으면 lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는
-   CUDA 호출에서 기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore).
-   멈춰 둔 스팟은 새로 옮겨야 하는 스팟보다 먼저 자리를 받습니다.
-5. **내보내기(Evict): 프로그램에 파이썬 오류를 냅니다. 프로세스를 강제로 죽이지 않습니다**(사용자 결정).
-   멈춰 둔 지 `park_seconds`가 지나면:
-   - 멈춰 둔 프로그램은 다시 돌아야 오류를 받을 수 있으므로, 같은 모델 GPU 중 (그 스팟이 쓰던 메모리 +
-     `mem_reserve_mib`)만큼 비어 있는 곳에 되살린 뒤, 컨테이너 안에 `/tmp/labgpu-spot-evicted`(사유 한 줄)를
-     남기고 `evict_signal`(기본 SIGINT, 파이썬에서는 `KeyboardInterrupt`)을 보냅니다.
-   - 그런 GPU가 없으면 오류를 보내지 않고 그대로 멈춰 두며, `park_seconds` 뒤 다시 시도합니다.
-   - 오류를 받고도 프로그램이 계속 돌면 규칙 2~4에 따라 다시 옮기거나 멈춰 둡니다. 같은 세션에는
-     `interrupt_interval_seconds`보다 자주 시그널을 보내지 않습니다.
-   - 세션 자체는 끝내지 않습니다. 다시 GPU를 쓰기 시작하면 규칙 2에 따라 빈 GPU로 배치됩니다.
-6. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기는 대신 GPU 위에서
-   바로 오류를 냅니다(5의 시그널). 이동이나 멈춰 두기가 실패해도 오류를 냅니다. **이때 프로그램이 오류를 받고도
-   끝내지 않으면 주인 GPU를 계속 함께 씁니다**(강제 종료가 없으므로). cuda-checkpoint가 동작하는 노드에서는
-   멈춰 두기로 GPU를 비우므로 이 경우가 생기지 않습니다.
-7. GPU를 둘 이상 쓰는 스팟 세션에는 오류를 냅니다.
+4. **옮길 GPU가 없을 때: 즉시 OOM 오류, 강제 종료 없음**(사용자 결정). `KeyboardInterrupt`(SIGINT)와 KILL은
+   쓰지 않습니다. "다음 할당에서 오류가 나기를" 기다리는 방식도 쓰지 않습니다(안정 상태의 학습은 새 할당을
+   하지 않아 오류가 늦거나 안 나고, 그동안 주인이 OOM으로 죽을 수 있음).
+   - 프로그램이 OOM 신호(`SIGRTMIN+10` = 44) 처리기를 걸어 두었으면(`/proc/<pid>/status`의 `SigCgt` 비트 43):
+     컨테이너 안에서 세션 사용자로 HAMi-core 제한을 붙은 GPU 모두 1MiB로 낮추고(`set_current_device_memory_limit`,
+     이후 할당도 실패), `/tmp/labgpu-spot-evicted`에 사유를 쓰고, 신호를 보냅니다. 처리기가 메인 스레드에서 즉시
+     `torch.OutOfMemoryError`를 냅니다(실측 0.46초). `oom_grace_seconds` 뒤에도 그 GPU에 남아 있으면(오류를 잡고
+     계속 도는 경우) 5로 멈춰 둡니다. 주인의 GPU를 붙잡고 있는 상태가 남지 않게 하려는 것입니다.
+   - 처리기가 없으면(파이썬이 아님, `python -S`/`-I`, 이미지 설정으로 가려짐 등) 오류를 내지 않고 바로 5로 멈춰 둡니다.
+   - 처리기는 스팟 플러그인이 넣는 `sitecustomize.py`가 겁니다(`/opt/labgpu/python`을 읽기 전용으로 붙이고
+     `PYTHONPATH`에 둠, 신호 번호는 `LABGPU_SPOT_OOM_SIGNAL`). 이미지 자체의 `sitecustomize`도 이어서 불러옵니다.
+     `SIGUSR1/2`는 쓰지 않습니다. HAMi-core가 CUDA 초기화 때 SIGUSR1을 가져가 파이썬 처리기를 덮어씁니다.
+     `uv run`도 `PYTHONPATH`를 넘기므로 동작합니다(2026-09-27 Primary). 이미지나 사용자가 `PYTHONPATH`를 따로 쓰면
+     컨테이너 설정이 이미지 값을 덮어쓰므로, 필요하면 사용자가 뒤에 붙여 써야 합니다.
+5. **멈춰 두기(Park)**: lock과 checkpoint만 합니다. GPU 메모리는 바로 비워지고 프로세스는 CUDA 호출에서
+   기다립니다. 매 틱 빈 GPU를 찾고, 원래 GPU가 다시 비면 그 자리도 됩니다(Restore). 멈춰 둔 스팟은 새로 옮겨야
+   하는 스팟보다 먼저 자리를 받습니다. 빈 GPU가 생길 때까지 **기한 없이** 기다립니다.
+6. 옮기거나 되살린 뒤에는 새 GPU의 빌려줄 수 있는 메모리로 HAMi-core 제한(`cuda:0`)을 다시 맞춥니다.
+7. cuda-checkpoint가 없거나 드라이버가 580 미만이면 시작할 때 ERROR를 남기고, 옮기거나 멈춰 둘 수 없으므로
+   4의 OOM 오류만 냅니다(`oom_grace_seconds`마다 다시). 처리기가 없거나 오류를 잡고 계속 돌면 주인 GPU를 함께
+   쓰게 되므로, cuda-checkpoint가 동작하는 노드에서만 스팟을 켜는 것이 맞습니다. 이동이 실패하면 OOM 오류를 냅니다.
+8. GPU를 둘 이상 쓰는 스팟 세션에는 OOM 오류를 냅니다.
+9. 세션 자체는 끝내지 않습니다. 다시 GPU를 쓰기 시작하면 규칙 2에 따라 빈 GPU로 배치됩니다.
 
-프로그램 쪽 권장: `KeyboardInterrupt`를 받으면 `/tmp/labgpu-spot-evicted`가 있는지 보고, 있으면 체크포인트를
-저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
+프로그램 쪽 권장: `torch.OutOfMemoryError`를 잡았을 때 `/tmp/labgpu-spot-evicted`가 있으면 GPU를 회수당한
+것이므로 체크포인트를 저장하고 끝냅니다. 옮기기와 멈춰 두기는 프로그램이 알아챌 필요가 없습니다.
 
 
 ### 2.13 감시기 실행 위치
@@ -539,7 +543,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | HAMi-core 제한을 건 채 cuda-checkpoint로 옮긴 뒤 제한이 새 GPU로 따라가는지, `CUDA_VISIBLE_DEVICES`를 순서만 바꿔 준 상태에서 이동이 되는지 | UNVERIFIED (연구실 노드) |
 | 스팟 플러그인의 GPU 고르기·환경변수·마운트(`tests/test_plugin_integration.py`) | 확인 (Primary, Backend.AI 26.8.3 소스 + agent venv Python 3.13.7: `8402dee` 66개 2026-09-25, `a9b3e6c` 69개 2026-09-26, 건너뜀 없음. `PYTHONPATH=src:<backend.ai>/src <bai venv>/bin/python -m pytest -q`) |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
-| 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
+| 즉시 OOM: `sitecustomize` 처리기 + 실시간 신호로 `torch.OutOfMemoryError`(0.46초), HAMi-core 제한을 실행 중 1MiB로 낮추면 다음 할당도 OOM, SIGUSR1은 HAMi-core가 가져가 안 됨, `uv run`에서도 동작 | 방법 확인 (2026-09-27, Primary, 손으로 실행). 플러그인에 넣은 뒤의 전체 흐름은 UNVERIFIED |
 | 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | root로 실행하면 실패: 컨테이너 `/etc/ld.so.preload`로 올라온 HAMi-core가 `/tmp/labgpu-vgpu.cache`를 열지 못함(`errno=13`), 이동 실패 뒤 내보내기로 넘어감 (2026-09-27, Primary, `1398dbf`). 주인 계정으로 실행하도록 고친 뒤는 UNVERIFIED |
 | 스팟 세션(`cuda-pro6000-spot.device` 1): 환경변수(`LABGPU_SPOT_GPU`, 고른 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_0=95184m`, `_1=1m`), HAMi-core 로드, 컨테이너 안 `/opt/labgpu/cuda-checkpoint`. torch 2.11(cu128): `cuda:0`이 고른 PRO 6000, 8GB 할당 성공, `cuda:1`에 100MB는 `OutOfMemoryError`(총 1024KiB). 컨테이너 안 `nvidia-smi`는 95184MiB / 1MiB. 학습을 돌리면 그 GPU가 LENT | 확인 (2026-09-27, Primary, `1398dbf`) |
 | 주인 세션이 같은 GPU를 받으면 감시기가 5초 안에 이동 시작(`new owner containers`) | 감지 확인 (2026-09-27, Primary). 이동 자체는 위 행의 권한 문제로 실패 |

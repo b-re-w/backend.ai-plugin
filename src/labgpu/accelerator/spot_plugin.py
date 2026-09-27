@@ -55,7 +55,7 @@ from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
-from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT
+from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT, OOM_SIGNAL
 from ..selection import GpuSelector, key_label, validate_key
 from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
@@ -76,6 +76,8 @@ POOL_DEVICE_ID = DeviceId("spot")
 ENV_SPOT = "LABGPU_SPOT"
 ENV_SPOT_UUIDS = "LABGPU_SPOT_UUIDS"
 ENV_SPOT_GPU = "LABGPU_SPOT_GPU"
+CONTAINER_PYTHON_DIR = "/opt/labgpu/python"
+INJECT_DIR = Path(__file__).resolve().parent.parent / "spot" / "inject"
 BLOCKED_LIMIT = "1m"  # HAMi-core limit for GPUs the session must not use (0 would mean unlimited)
 RESERVE_SECONDS = 120.0  # how long a GPU handed to a new session stays taken before the monitor reports it
 
@@ -273,6 +275,9 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             ENV_SPOT_GPU: chosen,
             "CUDA_VISIBLE_DEVICES": ",".join(order),
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
+            # SPEC 2.12: the out-of-memory error for a session that cannot be moved.
+            "PYTHONPATH": CONTAINER_PYTHON_DIR,
+            "LABGPU_SPOT_OOM_SIGNAL": str(OOM_SIGNAL),
         }
         for i, uuid in enumerate(order):
             env[f"CUDA_DEVICE_MEMORY_LIMIT_{i}"] = (
@@ -329,8 +334,12 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         tool = self.cuda_checkpoint
         if not tool.is_file():
             log.warning("[%s] %s not found: this spot session cannot be moved", self.entry_name, tool)
-            return []
-        return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT))]
+            return [MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR))]
+        return [
+            MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)),
+            # sitecustomize.py that turns the monitor's signal into torch.OutOfMemoryError.
+            MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR)),
+        ]
 
     # ---- metadata ----
 

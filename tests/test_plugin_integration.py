@@ -282,8 +282,11 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     tool = tmp_path / "cuda-checkpoint"
     tool.write_bytes(b"")
     spot.cuda_checkpoint = tool
-    [mount] = asyncio.run(spot.generate_mounts(tmp_path, alloc))
-    assert (mount.src_path, str(mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")
+    tool_mount, py_mount = asyncio.run(spot.generate_mounts(tmp_path, alloc))
+    assert (tool_mount.src_path, str(tool_mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")
+    assert str(py_mount.dst_path) == "/opt/labgpu/python"
+    assert (py_mount.src_path / "sitecustomize.py").is_file()
+    assert env["PYTHONPATH"] == "/opt/labgpu/python" and env["LABGPU_SPOT_OOM_SIGNAL"] == "44"
     assert asyncio.run(spot.generate_mounts(tmp_path, {})) == []
     meta = spot.get_metadata()
     assert meta["slot_name"] == "pro6000-spot.device" and meta["display_unit"] == "PRO6000-SPOT"

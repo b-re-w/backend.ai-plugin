@@ -9,7 +9,7 @@ from labgpu.spot.daemon import Controller
 from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
-from labgpu.spot.placement import Evict, Move, Park, ParkedSpot, Restore, RunningSpot, plan
+from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
 from labgpu.spotstatus import parse_status, pick_spot_gpu, spot_capacity
 
 P6K = "NVIDIA RTX PRO 6000"
@@ -26,7 +26,7 @@ def v(uuid, state, model=P6K, must=False, mem=80 * GiB, reasons=()):
 def test_spot_stays_on_quiet_lent_gpu():
     verdicts = {"A": v("A", GpuState.LENT), "B": v("B", GpuState.LENDABLE)}
     running = [RunningSpot("s1", frozenset({"A"}), ("A", "B"), 0)]
-    assert plan(verdicts, running, [], now=10, can_checkpoint=True, park_seconds=300) == []
+    assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10) == []
 
 
 def test_owner_back_moves_spot_to_same_model_gpu():
@@ -37,34 +37,42 @@ def test_owner_back_moves_spot_to_same_model_gpu():
         "D": v("D", GpuState.LENDABLE, mem=50 * GiB),
     }
     running = [RunningSpot("s1", frozenset({"A"}), ("A", "B", "C", "D"), 0)]
-    [action] = plan(verdicts, running, [], now=10, can_checkpoint=True, park_seconds=300)
+    [action] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
     assert action == Move("s1", "A", "D", "owner SM util 90% > 5%")
 
 
-def test_no_target_parks_then_evicts_after_timeout():
+def test_no_target_raises_oom_then_parks_if_still_on_the_gpu():
     verdicts = {"A": v("A", GpuState.RECLAIMING, must=True), "B": v("B", GpuState.BUSY)}
     running = [RunningSpot("s1", frozenset({"A"}), ("A", "B"), 0)]
-    [park] = plan(verdicts, running, [], now=10, can_checkpoint=True, park_seconds=300)
+    [oom] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    assert oom == Oom("s1", "A", "GPU is RECLAIMING")
+    assert plan(verdicts, running, [], now=15, can_checkpoint=True, oom_grace=10, oomed={"s1": 10}) == []
+    [park] = plan(verdicts, running, [], now=21, can_checkpoint=True, oom_grace=10, oomed={"s1": 10})
     assert isinstance(park, Park) and park.src == "A"
-    parked = [ParkedSpot("s1", "A", ("A", "B"), 10)]
-    assert plan(verdicts, [], parked, now=100, can_checkpoint=True, park_seconds=300) == []
-    [ev] = plan(verdicts, [], parked, now=310, can_checkpoint=True, park_seconds=300)
-    assert isinstance(ev, Evict) and ev.gpu is None
+    parked = [ParkedSpot("s1", "A", ("A", "B"), 21)]
+    assert plan(verdicts, [], parked, now=500, can_checkpoint=True, oom_grace=10) == []  # waits, never killed
+
+
+def test_program_without_the_oom_handler_is_parked_at_once():
+    verdicts = {"A": v("A", GpuState.RECLAIMING, must=True), "B": v("B", GpuState.BUSY)}
+    running = [RunningSpot("s1", frozenset({"A"}), ("A", "B"), 0, oom_ready=False)]
+    [park] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
+    assert isinstance(park, Park)
 
 
 def test_parked_spot_returns_to_its_own_gpu_when_it_frees_up():
     verdicts = {"A": v("A", GpuState.LENDABLE), "B": v("B", GpuState.BUSY)}
     parked = [ParkedSpot("s1", "A", ("A", "B"), 10)]
-    assert plan(verdicts, [], parked, now=20, can_checkpoint=True, park_seconds=300) == [
+    assert plan(verdicts, [], parked, now=20, can_checkpoint=True, oom_grace=10) == [
         Restore("s1", "A", "A")
     ]
 
 
-def test_without_cuda_checkpoint_evicts_right_away():
+def test_without_cuda_checkpoint_only_the_oom_error_is_possible():
     verdicts = {"A": v("A", GpuState.RECLAIMING, must=True)}
-    running = [RunningSpot("s1", frozenset({"A"}), ("A",), 0)]
-    [ev] = plan(verdicts, running, [], now=10, can_checkpoint=False, park_seconds=300)
-    assert ev == Evict("s1", "A", "GPU is RECLAIMING")
+    running = [RunningSpot("s1", frozenset({"A"}), ("A",), 0, oom_ready=False)]
+    [oom] = plan(verdicts, running, [], now=10, can_checkpoint=False, oom_grace=10)
+    assert oom == Oom("s1", "A", "GPU is RECLAIMING")
 
 
 def test_parked_spot_gets_the_free_gpu_first():
@@ -75,9 +83,9 @@ def test_parked_spot_gets_the_free_gpu_first():
     running = [RunningSpot("s2", frozenset({"A"}), ("A", "B"), 5)]
     parked = [ParkedSpot("s1", "C", ("A", "B", "C"), 1)]
     verdicts["C"] = v("C", GpuState.BUSY)
-    actions = plan(verdicts, running, parked, now=10, can_checkpoint=True, park_seconds=300)
+    actions = plan(verdicts, running, parked, now=10, can_checkpoint=True, oom_grace=10)
     assert Restore("s1", "C", "B") in actions
-    assert any(isinstance(a, Park) and a.container_id == "s2" for a in actions)
+    assert any(isinstance(a, Oom) and a.container_id == "s2" for a in actions)
 
 
 def test_second_spot_on_the_same_gpu_leaves_and_busy_is_skipped():
@@ -86,17 +94,17 @@ def test_second_spot_on_the_same_gpu_leaves_and_busy_is_skipped():
         RunningSpot("old", frozenset({"A"}), ("A", "B"), 0),
         RunningSpot("new", frozenset({"A"}), ("A", "B"), 5),
     ]
-    [mv] = plan(verdicts, running, [], now=10, can_checkpoint=True, park_seconds=300)
+    [mv] = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10)
     assert mv == Move("new", "A", "B", "another spot session is on this GPU")
-    assert plan(verdicts, running, [], now=10, can_checkpoint=True, park_seconds=300,
+    assert plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10,
                 busy=frozenset({"new"})) == []
 
 
-def test_multi_gpu_spot_is_evicted():
+def test_multi_gpu_spot_gets_the_oom_error():
     verdicts = {"A": v("A", GpuState.LENT), "B": v("B", GpuState.LENT)}
     running = [RunningSpot("s1", frozenset({"A", "B"}), ("A", "B"), 0)]
-    [ev] = plan(verdicts, running, [], now=1, can_checkpoint=True, park_seconds=300)
-    assert isinstance(ev, Evict)
+    [oom] = plan(verdicts, running, [], now=1, can_checkpoint=True, oom_grace=10)
+    assert isinstance(oom, Oom)
 
 
 def test_device_map_is_a_swap_over_every_visible_gpu():
@@ -187,6 +195,12 @@ class FakeCkpt:
     def restore(self, cid, pids, src, dst, visible):
         self.calls.append(("restore", tuple(pids), src, dst))
 
+    def set_limit(self, cid, pid, size):
+        self.calls.append(("limit", pid, size))
+
+    def raise_oom(self, cid, pids, devices, reason):
+        self.calls.append(("oom", tuple(pids), devices))
+
 
 class Inline:
     def submit(self, fn):
@@ -196,18 +210,19 @@ class Inline:
         pass
 
 
-def make_controller(tmp_path: Path, procs):
+def make_controller(tmp_path: Path, procs, handler=True):
     gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
     owner = OwnerContainer("o" * 64, 0, ("GPU-0",))
     spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"))
     cfg = Config(
         controller=ControllerConfig(state_dir=tmp_path),
         idle=IdleConfig(idle_minutes=1, owner_cpu_threshold=0),
-        spot=SpotConfig(park_seconds=60),
+        spot=SpotConfig(oom_grace_seconds=10),
     )
     fake = FakeGpus(gpus, procs)
     ck = FakeCkpt()
-    c = Controller(cfg, fake, FakeSessions([owner], [spot]), checkpointer=ck, workers=Inline())
+    c = Controller(cfg, fake, FakeSessions([owner], [spot]), checkpointer=ck, workers=Inline(),
+                   handler_check=lambda pid: handler)
     c.start()
     return c, fake, ck
 
@@ -224,7 +239,8 @@ def test_controller_moves_spot_when_owner_returns(tmp_path):
     assert c.last_verdicts["GPU-0"].state is GpuState.LENT and ck.calls == []
     procs[0][0] = (10, 4 * GiB, 80, OWNER)  # owner is back
     c.tick(90)
-    assert ck.calls == [("move", (20,), "GPU-0", "GPU-1")] or ck.calls == [("move", (20,), "GPU-0", "GPU-2")]
+    assert ck.calls[0] in (("move", (20,), "GPU-0", "GPU-1"), ("move", (20,), "GPU-0", "GPU-2"))
+    assert ck.calls[1][:2] == ("limit", 20) and ck.calls[1][2] > 80 * GiB  # new GPU's lendable memory
     c.write_status(tmp_path / "status.json", 90)
     status = json.loads((tmp_path / "status.json").read_text())
     assert status["can_move"] is True and status["gpus"][0]["lent_job"] == SPOT[:12]
@@ -233,7 +249,7 @@ def test_controller_moves_spot_when_owner_returns(tmp_path):
 def test_controller_parks_then_restores_and_persists(tmp_path):
     OWNER, SPOT = "o" * 64, "s" * 64
     procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
-    c, fake, ck = make_controller(tmp_path, procs)  # GPU-1/2 busy with unknown processes
+    c, fake, ck = make_controller(tmp_path, procs, handler=False)  # GPU-1/2 busy with strangers
     for t in (0, 61, 70):
         c.tick(t)
     procs[0].append((20, 30 * GiB, 90, SPOT))
@@ -249,6 +265,22 @@ def test_controller_parks_then_restores_and_persists(tmp_path):
     assert ("restore", (20,), "GPU-0", "GPU-2") in ck.calls
     c.tick(165)
     assert c.parked == {}
+
+
+def test_controller_raises_oom_then_parks_a_program_that_keeps_the_gpu(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs, handler=True)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    assert ck.calls == [("oom", (20,), 3)]  # torch.OutOfMemoryError right away, never killed
+    c.tick(85)
+    assert ck.calls == [("oom", (20,), 3)]  # gives the program oom_grace to react
+    c.tick(91)
+    assert ck.calls[-1] == ("park", (20,))  # still holding the owner's GPU: off the GPU
 
 
 def test_background_monitor_runs_once_per_process(tmp_path):
@@ -307,12 +339,12 @@ def test_state_dir_follows_the_agent_var_base_path():
 def test_monitor_config_from_etcd_strings():
     cfg = Config.from_dict({
         "idle": {"idle_minutes": "10", "ignored_processes": "Xorg, gnome-shell"},
-        "spot": {"enabled": "false", "park_seconds": "120", "cuda_checkpoint": "/opt/cc"},
+        "spot": {"enabled": "false", "oom_grace_seconds": "5", "cuda_checkpoint": "/opt/cc"},
         "reclaim": {"mem_reserve_mib": "4096"},
     })
     assert cfg.idle.idle_seconds == 600
     assert cfg.idle.ignored_processes == ("Xorg", "gnome-shell")
-    assert cfg.spot.enabled is False and cfg.spot.park_seconds == 120.0
+    assert cfg.spot.enabled is False and cfg.spot.oom_grace_seconds == 5.0
     assert cfg.spot.cuda_checkpoint == Path("/opt/cc") and cfg.reclaim.mem_reserve_mib == 4096
 
 
@@ -344,37 +376,41 @@ def test_cli_status_accepts_state_dir_after_the_command(tmp_path, capsys):
     assert main(["--state-dir", str(tmp_path), "status"]) == 0
 
 
-def test_interrupt_signals_as_owner_and_never_kills(monkeypatch):
-    import signal as sg
-
+def test_oom_lowers_limits_and_signals_as_owner(monkeypatch):
     from labgpu.spot import ckpt
 
     monkeypatch.setattr(ckpt, "_exists", lambda pid: True)
     calls = []
-    ckpt.interrupt("c1", [4242], sig=sg.SIGINT, reason="no free GPU",
+    ckpt.raise_oom("c1", [4242], devices=2, reason="no free GPU",
                    run=lambda cid, *argv, user: calls.append((user, argv)) or "",
                    identify=lambda p: ckpt.ProcIdentity(17, "1100:1200"))
     [(user, argv)] = calls
-    assert user == "1100:1200" and "kill -s INT 17" in argv[2] and ckpt.EVICT_MARKER in argv[2]
-    assert "KILL" not in argv[2]
+    assert user == "1100:1200" and argv[:2] == ("sh", "-c")
+    marker, code, limits, pids, sig = argv[4:9]
+    assert marker == "no free GPU" and "set_current_device_memory_limit" in code
+    assert eval(limits) == [(0, 1 << 20), (1, 1 << 20)] and eval(pids) == [17]
+    assert int(sig) == ckpt.OOM_SIGNAL and "KILL" not in code
+
+
+def test_has_handler_reads_sigcgt(tmp_path):
+    from labgpu.spot.ckpt import has_handler
+
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "status").write_text("SigCgt: %016x" % (1 << 43))
+    assert has_handler(7, 44, tmp_path) and not has_handler(7, 10, tmp_path)
+    assert not has_handler(8, 44, tmp_path)
 
 
 def test_parked_spot_without_room_stays_parked(tmp_path):
     OWNER, SPOT = "o" * 64, "s" * 64
     procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
-    c, fake, ck = make_controller(tmp_path, procs)
+    c, fake, ck = make_controller(tmp_path, procs, handler=False)
     for t in (0, 61, 70):
         c.tick(t)
     procs[0].append((20, 30 * GiB, 90, SPOT))
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
     c.tick(80)
     procs[0].pop()
-    c.tick(85)
-    assert SPOT in c.parked
-    # Every GPU stays busy and full: after park_seconds nothing is killed, it stays parked.
-    for g in fake.gpus:
-        object.__setattr__(g, "total_memory", 5 * GiB)
-    c.tick(150)
-    c.tick(155)
-    assert SPOT in c.parked and c.parked[SPOT].spot.since >= 150
-    assert not any(call[0] == "restore" for call in ck.calls)
+    for t in (85, 400, 900):
+        c.tick(t)
+    assert SPOT in c.parked and ck.calls == [("park", (20,))]  # waits off the GPU, never killed

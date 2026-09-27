@@ -73,6 +73,17 @@ def identify(host_pid: int, proc_root: Path = Path("/proc")) -> ProcIdentity:
         raise CheckpointError(f"cannot identify host pid {host_pid}: {e}") from e
 
 
+def has_handler(host_pid: int, signum: int, proc_root: Path = Path("/proc")) -> bool:
+    """Whether the process catches `signum` (SigCgt bit signum-1 in /proc/<pid>/status)."""
+    try:
+        for line in (proc_root / str(host_pid) / "status").read_text().splitlines():
+            if line.startswith("SigCgt:"):
+                return bool(int(line.split()[1], 16) >> (signum - 1) & 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
 class DockerExec:
     """Runs a command inside a container through the Docker daemon."""
 
@@ -144,6 +155,12 @@ class CudaCheckpoint:
             self._try(lambda: self.restore(cid, pids, src, src, visible))
             raise
 
+    def set_limit(self, cid: str, pid: int, size: int) -> None:
+        set_limit(cid, pid, size=size, run=self.run, identify=self.identify)
+
+    def raise_oom(self, cid: str, pids: Sequence[int], devices: int, reason: str) -> None:
+        raise_oom(cid, pids, devices=devices, reason=reason, run=self.run, identify=self.identify)
+
     @staticmethod
     def _try(fn: Callable[[], None]) -> None:
         try:
@@ -152,29 +169,80 @@ class CudaCheckpoint:
             log.error("rollback failed: %s", e)
 
 
-def interrupt(
+# Real-time signal the spot sitecustomize turns into torch.OutOfMemoryError (SPEC 2.12). Not
+# SIGUSR1/2: HAMi-core takes SIGUSR1 when CUDA initialises and replaces Python's handler.
+OOM_SIGNAL = 44  # SIGRTMIN + 10 with glibc; passed to the container as LABGPU_SPOT_OOM_SIGNAL
+BLOCKED_BYTES = 1 << 20
+
+# Runs inside the container as the session user. HAMi-core is loaded into every process there
+# through /etc/ld.so.preload, so its runtime limit setter is reachable with ctypes.CDLL(None); the
+# limit lives in the session's shared region and every later allocation re-reads it.
+_PY = """
+import ctypes, os, sys
+limits, pids, sig = eval(sys.argv[1]), eval(sys.argv[2]), int(sys.argv[3])
+try:
+    f = ctypes.CDLL(None).set_current_device_memory_limit
+    f.argtypes = [ctypes.c_int, ctypes.c_size_t]
+    for dev, size in limits:
+        f(dev, size)
+except AttributeError:
+    print("HAMi-core not loaded: memory limit unchanged", file=sys.stderr)
+for pid in pids:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+"""
+_SH = 'if [ -n "$1" ]; then printf "%s\n" "$1" > ' + EVICT_MARKER + """; fi
+shift
+for py in python3 python; do
+  command -v "$py" >/dev/null 2>&1 && exec "$py" -c "$@"
+done
+echo "no python in the container" >&2; exit 1"""
+
+
+def _hami(
+    run: Callable[..., str], cid: str, user: str, limits: Sequence[tuple[int, int]],
+    pids: Sequence[int] = (), sig: int = 0, marker: str = "",
+) -> None:
+    run(cid, "sh", "-c", _SH, "sh", marker, _PY, repr(list(limits)), repr(list(pids)), str(sig), user=user)
+
+
+def raise_oom(
     cid: str,
     pids: Sequence[int],
     *,
-    sig: signal.Signals,
+    devices: int,
     reason: str,
     run: Callable[..., str] | None = None,
     identify: Callable[[int], ProcIdentity] = identify,
 ) -> None:
     """
-    Raise an error in the spot program (SPEC 2.12): leave a marker file, then send `sig`
-    (SIGINT: KeyboardInterrupt in Python). Never kills; the program decides how to end.
-    Runs as the processes' owner, so the program can read and remove the marker.
+    Out-of-memory error in the spot program right now (SPEC 2.12, user decision): every attached
+    GPU's HAMi-core limit drops to 1 MiB so any further allocation fails too, the marker file
+    records why, and OOM_SIGNAL makes the injected handler raise torch.OutOfMemoryError in the
+    main thread. Never kills.
     """
     run = run or DockerExec()
     who = {p: identify(p) for p in pids if _exists(p)}
     if not who:
         return
     owner = next(iter(who.values())).user
-    name = sig.name.removeprefix("SIG")
-    targets = " ".join(str(w.pid) for w in who.values())
-    script = 'printf "%s\n" "$1" > ' + EVICT_MARKER + f"; kill -s {name} {targets}"
-    run(cid, "sh", "-c", script, "sh", reason, user=owner)
+    limits = [(d, BLOCKED_BYTES) for d in range(max(devices, 1))]
+    _hami(run, cid, owner, limits, [w.pid for w in who.values()], OOM_SIGNAL, reason)
+
+
+def set_limit(
+    cid: str,
+    pid: int,
+    *,
+    size: int,
+    run: Callable[..., str] | None = None,
+    identify: Callable[[int], ProcIdentity] = identify,
+) -> None:
+    """Give the program's cuda:0 `size` bytes again, e.g. after it moved to a new lendable GPU."""
+    run = run or DockerExec()
+    _hami(run, cid, identify(pid).user, [(0, max(size, BLOCKED_BYTES))])
 
 
 def _exists(pid: int) -> bool:

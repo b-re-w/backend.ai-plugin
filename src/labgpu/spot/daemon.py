@@ -19,14 +19,14 @@ from pathlib import Path
 from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
-from .ckpt import CheckpointError, CudaCheckpoint, interrupt
+from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, has_handler
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
 from .hostinfo import CpuSampler
 from .model import GpuObservation, GpuVerdict, ProcKind
 from .observer import observe
-from .placement import Action, Evict, Move, Park, ParkedSpot, Restore, RunningSpot, plan
+from .placement import Action, Move, Oom, Park, ParkedSpot, Restore, RunningSpot, plan
 
 log = logging.getLogger("ai.backend.labgpu.spot")
 
@@ -69,6 +69,7 @@ class Controller:
         cpu_sampler: CpuSampler | None = None,
         checkpointer: CudaCheckpoint | None = None,
         workers: ThreadPoolExecutor | None = None,
+        handler_check: Callable[[int], bool] | None = None,
     ) -> None:
         self.cfg = cfg
         self.gpus = gpus
@@ -83,10 +84,11 @@ class Controller:
         self.spot_info: dict[str, SpotContainer] = {}
         self.parked: dict[str, ParkedRecord] = {}
         self.busy: dict[str, str] = {}  # container -> operation in flight
-        self.interrupted: dict[str, float] = {}  # container -> when its program was last signalled
+        self.oomed: dict[str, float] = {}  # container -> when its program got the out-of-memory error
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
+        self.handler_check = handler_check or (lambda pid: has_handler(pid, OOM_SIGNAL))
         self.can_checkpoint = False
         self.workers = workers or ThreadPoolExecutor(max_workers=4, thread_name_prefix="spot-op")
         self._parked_path = cfg.controller.state_dir / "parked.json"
@@ -103,7 +105,7 @@ class Controller:
             why = f"driver version unknown: {e}"
         self.can_checkpoint = why is None
         if why:
-            log.error("spot sessions cannot be moved (%s); they will be evicted instead", why)
+            log.error("spot sessions cannot be moved or parked (%s); they only get the out-of-memory error", why)
         self._load_parked()
 
     def _load_parked(self) -> None:
@@ -202,6 +204,7 @@ class Controller:
                 frozenset(gs),
                 self.spot_info[cid].uuids if cid in self.spot_info else tuple(gs),
                 min(self.spot_seen[(cid, g)] for g in gs),
+                oom_ready=all(self.handler_check(pid) for pid in self._pids_on(cid, None)),
             )
             for cid, gs in gpus_of.items()
         ]
@@ -228,17 +231,26 @@ class Controller:
             log.info("parked spot %s is gone", cid[:12])
             del self.parked[cid]
             self._save_parked()
+        # Forget the OOM time of sessions that left their GPU (moved, parked, or finished).
+        on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
+        for c in [c for c in self.oomed if c not in on_gpu and c not in self.busy]:
+            del self.oomed[c]
         actions = plan(
             self.last_verdicts,
             self._running(now),
             [r.spot for r in self.parked.values()],
             now=now,
             can_checkpoint=self.can_checkpoint and self.cfg.spot.enabled,
-            park_seconds=self.cfg.spot.park_seconds,
+            oom_grace=self.cfg.spot.oom_grace_seconds,
+            oomed=self.oomed,
             busy=frozenset(self.busy),
         )
         for action in actions:
             self._dispatch(action, now)
+
+    def _lendable(self, uuid: str) -> int:
+        v = self.last_verdicts.get(uuid)
+        return v.lendable_memory if v is not None else 0
 
     def _dispatch(self, action: Action, now: float) -> None:
         cid = action.container_id
@@ -247,66 +259,42 @@ class Controller:
         match action:
             case Move(_, src, dst, reason):
                 pids = self._pids_on(cid, src)
+                size = self._lendable(dst)
                 log.info("spot %s: move %s -> %s (%s) pids=%s", cid[:12], src, dst, reason, pids)
-                job = lambda: ck.move(cid, pids, src, dst, visible)  # noqa: E731
-                fallback = self._evict_job(cid, pids, reason)
+
+                def job() -> None:
+                    ck.move(cid, pids, src, dst, visible)
+                    ck.set_limit(cid, pids[0], size)
+
+                fallback = self._oom_job(cid, pids, len(visible), reason)
             case Park(_, src, reason):
                 pids = self._pids_on(cid, src)
                 record = ParkedRecord(ParkedSpot(cid, src, visible, now), pids, self._mem_on(cid, src))
                 log.info("spot %s: park off %s (%s) pids=%s", cid[:12], src, reason, pids)
-                job = lambda: ck.park(cid, pids)  # noqa: E731
-                fallback = self._evict_job(cid, pids, reason)
-                self._submit(action, job, fallback, record)
+                self._submit(action, lambda: ck.park(cid, pids), None, record)
                 return
             case Restore(_, src, dst):
                 record = self.parked[cid]
+                size = self._lendable(dst)
                 log.info("spot %s: restore parked %s -> %s", cid[:12], src, dst)
-                job = lambda: ck.restore(cid, record.pids, src, dst, record.spot.allowed)  # noqa: E731
+
+                def job() -> None:
+                    ck.restore(cid, record.pids, src, dst, record.spot.allowed)
+                    ck.set_limit(cid, record.pids[0], size)
+
                 fallback = None
-            case Evict(_, gpu, reason):
-                if cid in self.parked:
-                    log.warning("spot %s: evict (%s)", cid[:12], reason)
-                    job = self._evict_parked_job(self.parked[cid], reason)
-                else:
-                    last = self.interrupted.get(cid)
-                    if last is not None and now - last < self.cfg.spot.interrupt_interval_seconds:
-                        return  # already told; give the program time to react
-                    log.warning("spot %s: evict (%s)", cid[:12], reason)
-                    self.interrupted[cid] = now
-                    job = self._evict_job(cid, self._pids_on(cid, gpu), reason)
+            case Oom(_, gpu, reason):
+                pids = self._pids_on(cid, None)
+                log.warning("spot %s: out-of-memory error on %s (%s) pids=%s", cid[:12], gpu, reason, pids)
+                self.oomed[cid] = now
+                job = self._oom_job(cid, pids, len(visible), reason)
                 fallback = None
         self._submit(action, job, fallback, None)
 
-    def _evict_job(self, cid: str, pids: tuple[int, ...], reason: str) -> Callable[[], None]:
-        """Raise the error in the program (SPEC 2.12). Nothing is ever killed."""
-        sig = signal.Signals[self.cfg.spot.evict_signal]
-        return lambda: interrupt(cid, pids, sig=sig, reason=reason)
-
-    def _evict_parked_job(self, record: ParkedRecord, reason: str) -> Callable[[], None]:
-        """
-        A parked program can only see the error once it runs again, so bring it back on a GPU of
-        its model with room for it, then raise the error. With no such GPU it stays parked (off
-        every GPU) and this is tried again after another park_seconds.
-        """
-        need = record.memory + self.cfg.reclaim.mem_reserve
-        src_model = self.last_obs[record.spot.src].model if record.spot.src in self.last_obs else None
-        rooms = [
-            o for u, o in self.last_obs.items()
-            if u in record.spot.allowed and o.ok and o.model == src_model and o.free_memory >= need
-        ]
+    def _oom_job(self, cid: str, pids: tuple[int, ...], devices: int, reason: str) -> Callable[[], None]:
+        """torch.OutOfMemoryError in the program right away (SPEC 2.12). Nothing is ever killed."""
         ck = self.checkpointer
-        sig = signal.Signals[self.cfg.spot.evict_signal]
-        cid = record.spot.container_id
-
-        def job() -> None:
-            if not rooms or ck is None:
-                raise CheckpointError("no GPU has room to resume it; it stays parked")
-            dst = max(rooms, key=lambda o: o.free_memory).uuid
-            ck.restore(cid, record.pids, record.spot.src, dst, record.spot.allowed)
-            self.interrupted[cid] = time.time()
-            interrupt(cid, record.pids, sig=sig, reason=reason)
-
-        return job
+        return lambda: ck.raise_oom(cid, pids, devices, reason)
 
     def _submit(
         self,
@@ -326,12 +314,12 @@ class Controller:
                 ok = False
                 log.error("spot %s: %s failed: %s", cid[:12], type(action).__name__, e)
                 if fallback is not None:
-                    log.warning("spot %s: raising the error in the program instead", cid[:12])
-                    self.interrupted[cid] = time.time()
+                    log.warning("spot %s: raising the out-of-memory error instead", cid[:12])
+                    self.oomed[cid] = time.time()
                     try:
                         fallback()
-                    except OSError as e2:
-                        log.error("spot %s: eviction failed: %s", cid[:12], e2)
+                    except (CheckpointError, OSError) as e2:
+                        log.error("spot %s: out-of-memory error failed: %s", cid[:12], e2)
             except Exception:
                 ok = False
                 log.exception("spot %s: %s crashed", cid[:12], type(action).__name__)
@@ -350,15 +338,9 @@ class Controller:
             if isinstance(action, Park) and ok and record is not None:
                 self.parked[cid] = record
                 changed = True
-            elif isinstance(action, Evict) and cid in self.parked and not ok:
-                # Stayed parked: wait another park_seconds before trying again.
-                old = self.parked[cid]
-                self.parked[cid] = replace(old, spot=replace(old.spot, since=time.time()))
+            elif isinstance(action, Restore) and ok and cid in self.parked:
+                del self.parked[cid]
                 changed = True
-            elif isinstance(action, (Restore, Evict)) and cid in self.parked:
-                if ok:
-                    del self.parked[cid]
-                    changed = True
         if changed:
             self._save_parked()
 
