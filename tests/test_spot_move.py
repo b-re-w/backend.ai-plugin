@@ -424,7 +424,7 @@ def test_mixed_processes_each_get_their_own_treatment(tmp_path):
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
     c.tick(80)
     # 21 is taken off the GPU at once; 20 gets the error and its grace period.
-    assert ck.calls == [("park", (21,)), ("oom", (20,), ("GPU-0", "GPU-1", "GPU-2"))]
+    assert ck.calls == [("oom", (20,), ("GPU-0", "GPU-1", "GPU-2")), ("park", (21,))]
     procs[0].remove((21, 10 * GiB, 90, SPOT))
     c.tick(85)
     assert c.parked[SPOT].pids == (21,)
@@ -496,5 +496,5 @@ def test_failed_park_still_sends_the_oom_error(tmp_path):
     procs[0] += [(20, 20 * GiB, 90, SPOT), (21, 10 * GiB, 90, SPOT)]
     procs[0][0] = (10, 4 * GiB, 80, OWNER)
     c.tick(80)
-    assert ck.calls == [("park-failed", (21,)), ("oom", (20,), ("GPU-0", "GPU-1", "GPU-2"))]
+    assert ck.calls == [("oom", (20,), ("GPU-0", "GPU-1", "GPU-2")), ("park-failed", (21,))]
     assert c.oomed[SPOT] == 80 and SPOT not in c.parked

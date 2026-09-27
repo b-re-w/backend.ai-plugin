@@ -302,20 +302,16 @@ class Controller:
                 )
 
                 def job() -> None:
-                    # The error for the processes that can take it goes out even if parking the
-                    # others failed, and only a delivered error starts the grace period.
-                    parked = True
+                    # The error goes out first (parking takes seconds), and even if parking the
+                    # others fails; only a delivered error starts the grace period.
+                    if ready or not silent:
+                        oom()
+                        self.oomed[cid] = now  # the tick's clock, as placement compares with it
                     if silent:
                         try:
                             ck.park(cid, silent)
                         except CheckpointError as e:
-                            parked = False
-                            log.error("spot %s: parking %s failed: %s", cid[:12], silent, e)
-                    if ready or not silent:
-                        oom()
-                        self.oomed[cid] = now  # the tick's clock, as placement compares with it
-                    if not parked:
-                        raise CheckpointError(f"processes {silent} are still on the GPU")
+                            raise CheckpointError(f"processes {silent} are still on the GPU: {e}") from e
 
                 self._submit(action, job, None, record)
                 return
