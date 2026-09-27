@@ -135,6 +135,9 @@ agent를 재시작하는 동안에는 감시도 멈춥니다. 멈춰 둔 스팟 
 - 옮길 GPU가 없으면 GPU에서 빠진 채 멈춰 기다립니다(기본 5분). 그래도 자리가 없으면 `KeyboardInterrupt`
   (SIGINT)를 받고, 30초 뒤 강제 종료됩니다. 이때 컨테이너 안에 `/tmp/labgpu-spot-evicted`가 생기므로,
   직접 멈춘 것과 구분해 체크포인트를 저장하고 끝내도록 짜 두세요. 세션은 남아 있고, 다시 실행하면 빈 GPU에서 돕니다.
+- 학습을 `&`나 `nohup`으로 **백그라운드에서** 띄우면 셸이 SIGINT를 무시하도록 물려주어 `KeyboardInterrupt`가
+  들어가지 않고, 30초 뒤 저장할 기회 없이 강제 종료됩니다. 백그라운드로 띄울 때는 프로그램 첫머리에
+  `signal.signal(signal.SIGINT, signal.default_int_handler)`를 넣어 SIGINT를 다시 받게 하세요.
 
 ## 5. 소유자가 알아 둘 것
 

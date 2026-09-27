@@ -316,21 +316,22 @@ def test_monitor_config_from_etcd_strings():
     assert cfg.spot.cuda_checkpoint == Path("/opt/cc") and cfg.reclaim.mem_reserve_mib == 4096
 
 
-def test_cuda_checkpoint_runs_inside_the_container(tmp_path):
-    from labgpu.spot.ckpt import CONTAINER_CUDA_CHECKPOINT, CudaCheckpoint, container_pid
+def test_cuda_checkpoint_runs_inside_the_container_as_the_owner(tmp_path):
+    from labgpu.spot.ckpt import CONTAINER_CUDA_CHECKPOINT, CudaCheckpoint, ProcIdentity, identify
 
     (tmp_path / "4242").mkdir()
-    (tmp_path / "4242" / "status").write_text("Name: python\nNSpid: 4242 17\n")
-    assert container_pid(4242, tmp_path) == 17
+    (tmp_path / "4242" / "status").write_text(
+        "Name: python\nUid: 1100 1100 1100 1100\nGid: 1200 1200 1200 1200\nNSpid: 4242 17\n")
+    assert identify(4242, tmp_path) == ProcIdentity(17, "1100:1200")
     calls = []
-    ck = CudaCheckpoint(Path("/x"), run=lambda cid, *argv: calls.append((cid, argv)) or "",
-                        pid_in_container=lambda p: p - 4225)
+    ck = CudaCheckpoint(Path("/x"), run=lambda cid, *argv, user: calls.append((cid, user, argv)) or "",
+                        identify=lambda p: ProcIdentity(17, "1100:1200"))
     ck.move("c1", [4242], "GPU-a", "GPU-b", ["GPU-a", "GPU-b"])
-    actions = [argv[argv.index("--action") + 1] for _, argv in calls]
+    actions = [argv[argv.index("--action") + 1] for _, _, argv in calls]
     assert actions == ["lock", "checkpoint", "restore", "unlock"]
-    cid, argv = calls[2]
-    assert cid == "c1" and CONTAINER_CUDA_CHECKPOINT in argv and argv[:5] == (
-        "env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
+    cid, user, argv = calls[2]
+    assert cid == "c1" and user == "1100:1200" and CONTAINER_CUDA_CHECKPOINT in argv
+    assert argv[:5] == ("env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
     assert argv[argv.index("--pid") + 1] == "17"
     assert argv[argv.index("--device-map") + 1] == "GPU-a=GPU-b,GPU-b=GPU-a"
 

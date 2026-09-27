@@ -2,10 +2,16 @@
 Carry out spot placement actions (SPEC 2.12): NVIDIA cuda-checkpoint for moving and parking,
 signals for eviction. Thin adapter; the decisions live in `labgpu.spot.placement`.
 
-Everything goes through `docker exec -u root` into the spot container, the way the agent itself
-works through the Docker daemon: the agent (and so the monitor) may run as an ordinary user in the
-docker group, which cannot touch other users' processes on the host (SPEC 2.13). The spot plugin
-mounts cuda-checkpoint into every spot container read-only at `CONTAINER_CUDA_CHECKPOINT`.
+Everything goes through `docker exec` into the spot container, the way the agent itself works
+through the Docker daemon: the agent (and so the monitor) may run as an ordinary user in the docker
+group, which cannot touch other users' processes on the host (SPEC 2.13). The spot plugin mounts
+cuda-checkpoint into every spot container read-only at `CONTAINER_CUDA_CHECKPOINT`.
+
+Commands run as the **owner of the target process** (its uid:gid), not root. Backend.AI also writes
+the HAMi-core hook into the container's /etc/ld.so.preload, so it loads into every process there,
+including cuda-checkpoint, and it must be able to open the session's shared cache file, which
+belongs to the session user (as root it fails with EACCES). The owner may checkpoint and signal
+its own processes.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger("ai.backend.labgpu.spot.ckpt")
@@ -30,6 +37,12 @@ CLEAN_ENV = ("env", "-u", "LD_PRELOAD", "-u", "CUDA_VISIBLE_DEVICES")
 
 class CheckpointError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ProcIdentity:
+    pid: int  # inside the container (last NSpid entry)
+    user: str  # "uid:gid" for `docker exec -u` (numeric ids are the same inside the container)
 
 
 def device_map(src: str, dst: str, visible: Sequence[str]) -> str:
@@ -48,26 +61,27 @@ def driver_major(version: str) -> int:
         return 0
 
 
-def container_pid(host_pid: int, proc_root: Path = Path("/proc")) -> int:
-    """The PID a host process has inside its container (last NSpid entry; world-readable)."""
+def identify(host_pid: int, proc_root: Path = Path("/proc")) -> ProcIdentity:
+    """Container PID and owner of a host process, from /proc/<pid>/status (world-readable)."""
+    fields: dict[str, list[str]] = {}
     try:
         for line in (proc_root / str(host_pid) / "status").read_text().splitlines():
-            if line.startswith("NSpid:"):
-                return int(line.split()[-1])
-    except (OSError, ValueError) as e:
-        raise CheckpointError(f"cannot map host pid {host_pid} into its container: {e}") from e
-    raise CheckpointError(f"no NSpid for host pid {host_pid}")
+            key, _, value = line.partition(":")
+            fields[key] = value.split()
+        return ProcIdentity(int(fields["NSpid"][-1]), f"{fields['Uid'][0]}:{fields['Gid'][0]}")
+    except (OSError, ValueError, KeyError, IndexError) as e:
+        raise CheckpointError(f"cannot identify host pid {host_pid}: {e}") from e
 
 
 class DockerExec:
-    """Runs a command as root inside a container through the Docker daemon."""
+    """Runs a command inside a container through the Docker daemon."""
 
     def __init__(self, docker: str = "docker", timeout: float = 60.0) -> None:
         self.docker = docker
         self.timeout = timeout
 
-    def __call__(self, container_id: str, *argv: str) -> str:
-        cmd = [self.docker, "exec", "-u", "root", container_id, *argv]
+    def __call__(self, container_id: str, *argv: str, user: str) -> str:
+        cmd = [self.docker, "exec", "-u", user, container_id, *argv]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -84,11 +98,11 @@ class CudaCheckpoint:
         timeout: float = 60.0,
         *,
         run: Callable[..., str] | None = None,
-        pid_in_container: Callable[[int], int] = container_pid,
+        identify: Callable[[int], ProcIdentity] = identify,
     ) -> None:
         self.host_path = host_path  # what the spot plugin mounts; checked here, run in the container
         self.run = run or DockerExec(timeout=timeout)
-        self.pid_in_container = pid_in_container
+        self.identify = identify
 
     def available(self, driver_version: str) -> str | None:
         """None when usable, otherwise why not."""
@@ -100,9 +114,11 @@ class CudaCheckpoint:
 
     def _each(self, cid: str, action: str, pids: Sequence[int], *extra: str) -> None:
         for pid in pids:
+            who = self.identify(pid)
             self.run(
                 cid, *CLEAN_ENV, CONTAINER_CUDA_CHECKPOINT,
-                "--action", action, "--pid", str(self.pid_in_container(pid)), *extra,
+                "--action", action, "--pid", str(who.pid), *extra,
+                user=who.user,
             )
 
     def park(self, cid: str, pids: Sequence[int]) -> None:
@@ -144,20 +160,24 @@ def evict(
     grace: float,
     reason: str,
     run: Callable[..., str] | None = None,
-    pid_in_container: Callable[[int], int] = container_pid,
+    identify: Callable[[int], ProcIdentity] = identify,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """
     Leave a marker file in the container, send `sig` (SIGINT raises KeyboardInterrupt in Python),
     wait up to `grace` seconds, then SIGKILL what is left. The session itself keeps running.
+    Runs as the processes' owner, so the program can read and remove the marker.
     """
     run = run or DockerExec()
-    inner = {p: pid_in_container(p) for p in pids if _exists(p)}
-    if not inner:
+    who = {p: identify(p) for p in pids if _exists(p)}
+    if not who:
         return
+    inner = {p: w.pid for p, w in who.items()}
+    owner = next(iter(who.values())).user
     name = sig.name.removeprefix("SIG")
     targets = " ".join(str(p) for p in inner.values())
-    run(cid, "sh", "-c", f'printf "%s\\n" "$1" > {EVICT_MARKER}; kill -s {name} {targets}', "sh", reason)
+    script = 'printf "%s\\n" "$1" > ' + EVICT_MARKER + f"; kill -s {name} {targets}"
+    run(cid, "sh", "-c", script, "sh", reason, user=owner)
     left = grace
     alive = list(inner)
     while alive and left > 0:
@@ -166,7 +186,7 @@ def evict(
         alive = [p for p in alive if _exists(p)]
     if alive:
         try:
-            run(cid, "kill", "-s", "KILL", *(str(inner[p]) for p in alive))
+            run(cid, "kill", "-s", "KILL", *(str(inner[p]) for p in alive), user=owner)
         except CheckpointError as e:
             log.error("SIGKILL in %s failed: %s", cid[:12], e)
 

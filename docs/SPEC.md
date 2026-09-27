@@ -441,11 +441,15 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
   Docker 데몬을 거쳐 합니다. 다른 사용자의 호스트 프로세스를 직접 건드리지 않습니다.
   - 스팟 플러그인이 `cuda-checkpoint`(기본 `<체크아웃>/.venv/bin/cuda-checkpoint`, `monitor/spot/cuda_checkpoint`로
     변경)를 스팟 컨테이너의 `/opt/labgpu/cuda-checkpoint`에 **읽기 전용**으로 붙입니다(agent 마운트, 항상 읽기 전용).
-  - 옮기기·멈춰 두기·되살리기: `docker exec -u root <컨테이너> env -u LD_PRELOAD -u CUDA_VISIBLE_DEVICES
-    /opt/labgpu/cuda-checkpoint --action … --pid <컨테이너 안 PID>`. 컨테이너 안 PID는 호스트
-    `/proc/<pid>/status`의 `NSpid` 마지막 값입니다(누구나 읽을 수 있음). HAMi-core와 순서를 바꾼 GPU 목록은
-    사용자 프로그램용이라 뺍니다.
-  - 내보내기: `docker exec -u root <컨테이너> sh -c`로 `/tmp/labgpu-spot-evicted`를 쓰고 `kill -s INT`, 유예 뒤 `kill -s KILL`.
+  - 옮기기·멈춰 두기·되살리기: `docker exec -u <uid:gid> <컨테이너> env -u LD_PRELOAD -u CUDA_VISIBLE_DEVICES
+    /opt/labgpu/cuda-checkpoint --action … --pid <컨테이너 안 PID>`. 컨테이너 안 PID(`NSpid` 마지막 값)와
+    uid·gid는 호스트 `/proc/<pid>/status`에서 읽습니다(누구나 읽을 수 있음).
+  - **대상 프로세스의 주인 계정으로 실행합니다(root 아님).** Backend.AI는 HAMi-core를 컨테이너의
+    `/etc/ld.so.preload`에도 넣어서 `LD_PRELOAD`를 지워도 cuda-checkpoint에 HAMi-core가 올라옵니다. 이때
+    HAMi-core가 세션 사용자 소유의 공유 파일(`/tmp/labgpu-vgpu.cache`)을 열어야 하는데 root로는 `EACCES`로
+    실패합니다(2026-09-27 Primary에서 확인). 주인 계정은 자기 프로세스를 체크포인트하고 시그널을 보낼 수 있습니다.
+  - 내보내기: 같은 주인 계정으로 `sh -c`를 실행해 `/tmp/labgpu-spot-evicted`를 쓰고 `kill -s INT`, 유예 뒤
+    `kill -s KILL`. 표시 파일도 주인 소유라 프로그램이 읽고 지울 수 있습니다.
   - 관찰(NVML, `/proc/<pid>/cgroup`, `docker inspect`)은 일반 계정으로 됩니다.
   - 스팟 사용자도 그 도구를 실행할 수 있지만, 자기 컨테이너 안 프로세스에만 쓸 수 있습니다.
 - 상태 파일(`status.json`, `parked.json`)은 Backend.AI 관례대로 agent의 `[agent] var-base-path` 아래 `labgpu/`에
@@ -531,7 +535,10 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
 | 스팟 플러그인의 GPU 고르기·환경변수·마운트(`tests/test_plugin_integration.py`) | 확인 (Primary, Backend.AI 26.8.3 소스 + agent venv Python 3.13.7: `8402dee` 66개 2026-09-25, `a9b3e6c` 69개 2026-09-26, 건너뜀 없음. `PYTHONPATH=src:<backend.ai>/src <bai venv>/bin/python -m pytest -q`) |
 | 실제 GPU에서 Backend.AI 스팟 컨테이너 안의 프로세스를 cuda-checkpoint로 옮기기(호스트 PID, 모든 같은 종류 GPU를 붙인 컨테이너) | UNVERIFIED (연구실 노드 필요) |
 | 내보낼 때 SIGINT가 파이썬에 `KeyboardInterrupt`로 들어가고 표시 파일이 보임 | UNVERIFIED (연구실 노드 필요) |
-| 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | UNVERIFIED (연구실 노드) |
+| 컨테이너 안(`docker exec -u root`)에서 cuda-checkpoint로 멈춰 두기·옮기기, agent가 root가 아닐 때 감시기 동작 | root로 실행하면 실패: 컨테이너 `/etc/ld.so.preload`로 올라온 HAMi-core가 `/tmp/labgpu-vgpu.cache`를 열지 못함(`errno=13`), 이동 실패 뒤 내보내기로 넘어감 (2026-09-27, Primary, `1398dbf`). 주인 계정으로 실행하도록 고친 뒤는 UNVERIFIED |
+| 스팟 세션(`cuda-pro6000-spot.device` 1): 환경변수(`LABGPU_SPOT_GPU`, 고른 GPU가 맨 앞인 `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_MEMORY_LIMIT_0=95184m`, `_1=1m`), HAMi-core 로드, 컨테이너 안 `/opt/labgpu/cuda-checkpoint`. torch 2.11(cu128): `cuda:0`이 고른 PRO 6000, 8GB 할당 성공, `cuda:1`에 100MB는 `OutOfMemoryError`(총 1024KiB). 컨테이너 안 `nvidia-smi`는 95184MiB / 1MiB. 학습을 돌리면 그 GPU가 LENT | 확인 (2026-09-27, Primary, `1398dbf`) |
+| 주인 세션이 같은 GPU를 받으면 감시기가 5초 안에 이동 시작(`new owner containers`) | 감지 확인 (2026-09-27, Primary). 이동 자체는 위 행의 권한 문제로 실패 |
+| 내보내기: 표시 파일에 사유 문자열, 파이썬에 `KeyboardInterrupt`, 유예 뒤 SIGKILL | 확인 (2026-09-27, Primary). 백그라운드(`&`, `nohup`)로 띄운 프로세스는 SIGINT를 무시하도록 물려받아 `KeyboardInterrupt` 없이 유예 뒤 SIGKILL로 끝남 |
 | NVIDIA `cuda-checkpoint`로 실행 중인 PyTorch 프로세스를 멈춰 GPU 메모리를 비우고, 같은 종류의 다른 GPU에서 이어 가기 (드라이버 580.178.04, Backend.AI 밖 단독 프로세스, `e2e/node/cc_migrate.sh`) | 확인 (2026-09-25, Secondary, GPU 0에서 1로 이동 PASS, 체크포인트부터 잠금 해제까지 약 6.5초, 이동 후 학습 계속). Backend.AI 컨테이너 안에서는 미확인 |
 
 ## 4. 열린 질문
