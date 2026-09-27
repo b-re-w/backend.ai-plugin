@@ -210,13 +210,14 @@ class Controller:
         ]
 
     def _pids_on(self, cid: str, gpu: str | None) -> tuple[int, ...]:
-        return tuple(
+        # A process with contexts on two GPUs is listed once.
+        return tuple(dict.fromkeys(
             p.pid
             for o in self.last_obs.values()
             if gpu is None or o.uuid == gpu
             for p in o.processes
             if p.kind is ProcKind.SPOT and p.container_id == cid
-        )
+        ))
 
     def _mem_on(self, cid: str, gpu: str) -> int:
         o = self.last_obs.get(gpu)
@@ -293,7 +294,6 @@ class Controller:
                     "spot %s: out-of-memory error on %s (%s) pids=%s, parked without it=%s",
                     cid[:12], gpu, reason, ready or pids, silent,
                 )
-                self.oomed[cid] = now
                 oom = self._oom_job(cid, ready or pids, self._order(visible, gpu), reason)
                 record = (
                     ParkedRecord(ParkedSpot(cid, gpu, visible, now), silent, self._mem_on(cid, gpu))
@@ -302,10 +302,20 @@ class Controller:
                 )
 
                 def job() -> None:
+                    # The error for the processes that can take it goes out even if parking the
+                    # others failed, and only a delivered error starts the grace period.
+                    parked = True
                     if silent:
-                        ck.park(cid, silent)
+                        try:
+                            ck.park(cid, silent)
+                        except CheckpointError as e:
+                            parked = False
+                            log.error("spot %s: parking %s failed: %s", cid[:12], silent, e)
                     if ready or not silent:
                         oom()
+                        self.oomed[cid] = now  # the tick's clock, as placement compares with it
+                    if not parked:
+                        raise CheckpointError(f"processes {silent} are still on the GPU")
 
                 self._submit(action, job, None, record)
                 return

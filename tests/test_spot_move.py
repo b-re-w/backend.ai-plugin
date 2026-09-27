@@ -476,3 +476,25 @@ def test_sitecustomize_follows_the_monitor_env_file(tmp_path, monkeypatch):
     import os
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-b,GPU-a"
     assert os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] == "10m" and os.environ["PATH"] == path_before
+
+
+def test_failed_park_still_sends_the_oom_error(tmp_path):
+    from labgpu.spot.ckpt import CheckpointError
+
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    c.handler_check = lambda pid: pid == 20
+
+    def broken_park(cid, pids):
+        ck.calls.append(("park-failed", tuple(pids)))
+        raise CheckpointError("process exited")
+
+    ck.park = broken_park
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0] += [(20, 20 * GiB, 90, SPOT), (21, 10 * GiB, 90, SPOT)]
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    assert ck.calls == [("park-failed", (21,)), ("oom", (20,), ("GPU-0", "GPU-1", "GPU-2"))]
+    assert c.oomed[SPOT] == 80 and SPOT not in c.parked

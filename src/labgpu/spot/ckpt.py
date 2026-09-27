@@ -269,7 +269,8 @@ def place(
     every other attached GPU, including the one handed back to its owner, 1 MiB (SPEC 2.12).
     """
     run = run or DockerExec()
-    limits = [max(size, BLOCKED_BYTES)] + [BLOCKED_BYTES] * (len(order) - 1)
+    # Whole MiB: the env file says "<n>m", and HAMi-core compares it with the shared value.
+    limits = [max(size // BLOCKED_BYTES * BLOCKED_BYTES, BLOCKED_BYTES)] + [BLOCKED_BYTES] * (len(order) - 1)
     _hami(run, cid, identify(pid).user, limits, order)
 
 
