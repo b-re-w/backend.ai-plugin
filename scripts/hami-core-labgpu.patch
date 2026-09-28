@@ -108,3 +108,18 @@ index 98e2f28..30c6561 100755
      for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
          cuda_to_nvml_map_array[i] = i;
      }
+diff --git a/src/cuda/device.c b/src/cuda/device.c
+--- a/src/cuda/device.c
++++ b/src/cuda/device.c
+@@ -91,6 +91,11 @@ CUresult cuDeviceTotalMem_v2 ( size_t* bytes, CUdevice dev ) {
+     LOG_DEBUG("into cuDeviceTotalMem");
+     ENSURE_INITIALIZED();
+     size_t limit = get_current_device_memory_limit(dev);
++    if (limit == 0) {
++        /* No CUDA_DEVICE_MEMORY_LIMIT for this device (whole-GPU session):
++           report the real total instead of 0, as cuMemGetInfo_v2 does. */
++        return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
++    }
+     *bytes = limit;
+     return CUDA_SUCCESS;
+ }

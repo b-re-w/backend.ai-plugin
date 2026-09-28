@@ -116,6 +116,12 @@ etcd 값은 모두 문자열로 들어오므로 문자열로 파싱합니다.
 
 - fractional 모드이고 강제 가능할 때만 `[hook_path]`를 돌려줍니다. Backend.AI agent가 이 파일을
   `/opt/kernel/libvgpu.so`로 마운트하고 `LD_PRELOAD`에 붙입니다.
+- 이 라이브러리는 GPU를 한 장 단위로 받은 세션(메모리 한도 없음)에도 들어갑니다. 원본 HAMi-core는 이때 GPU 전체
+  메모리(`cuDeviceTotalMem_v2`, 따라서 `cudaGetDeviceProperties().totalGlobalMem`)를 0으로 알려,
+  PyTorch `expandable_segments`가 크기 0으로 주소 공간을 잡다가 `CUDA driver error: invalid argument`로 실패했습니다
+  (2026-09-29 Secondary 사용자 세션). `scripts/hami-core-labgpu.patch`는 한도가 없으면 진짜 전체 메모리를
+  돌려주게 고칩니다(사용자 결정). 이미 떠 있는 세션은 예전 라이브러리를 계속 쓰므로 세션을 새로 만들어야 적용됩니다.
+  설치는 새 파일로 바꿔 넣으므로(`install`) 떠 있는 세션을 해치지 않습니다.
 
 ### 1.9 기타 메서드
 

@@ -13,7 +13,8 @@
 # CUDA_VISIBLE_DEVICES entries as numbers, so the GPU UUIDs the spot plugin sets all became index 0
 # (limits and nvidia-smi on the wrong GPU, "host pid is error"). The patch maps UUIDs to NVML
 # indices, applies that mapping in NVML-only programs such as nvidia-smi, and shows GPUs a spot
-# session was not given as 1 MiB.
+# session was not given as 1 MiB. It also reports the real total memory for a GPU without a limit
+# (whole-GPU sessions) instead of 0, which broke PyTorch expandable_segments.
 # Without the library the plugins log an ERROR and fall back to whole-GPU (`<key>.device`) slots.
 set -euo pipefail
 
