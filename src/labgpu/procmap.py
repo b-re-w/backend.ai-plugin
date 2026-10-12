@@ -37,6 +37,20 @@ def container_of_pid(pid: int, proc_root: Path = Path("/proc")) -> str | None:
         return None
 
 
+def pid_in_container(pid: int, container_id: str, proc_root: Path = Path("/proc")) -> bool:
+    """
+    Whether a recorded process still exists in `container_id`. False only when it is surely gone
+    or its PID now belongs to something else; an unreadable /proc entry for another reason keeps it.
+    """
+    try:
+        text = (proc_root / str(pid) / "cgroup").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        return True
+    return parse_cgroup(text) == container_id
+
+
 def process_name(pid: int, proc_root: Path = Path("/proc")) -> str:
     """The kernel's short process name (/proc/<pid>/comm), or "" if unreadable."""
     try:

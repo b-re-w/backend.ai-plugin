@@ -106,3 +106,15 @@ def test_cpu_sampler(tmp_path: Path):
     (cg / "cpu.stat").write_text("usage_usec 2000000\n")
     assert sampler.sample(CID, 42, 102.0) == pytest.approx(1.0)
     assert sampler.sample(CID, 999, 104.0) is None
+
+
+def test_pid_in_container_only_drops_gone_or_reused_pids(tmp_path):
+    cid = "c" * 64
+    (tmp_path / "7").mkdir()
+    (tmp_path / "7" / "cgroup").write_text(f"0::/system.slice/docker-{cid}.scope\n")
+    (tmp_path / "8").mkdir()
+    (tmp_path / "8" / "cgroup").write_text("0::/user.slice/user-1000.slice/session-3.scope\n")
+    assert procmap.pid_in_container(7, cid, tmp_path)
+    assert not procmap.pid_in_container(7, "d" * 64, tmp_path)  # PID reused by another container
+    assert not procmap.pid_in_container(8, cid, tmp_path)  # PID reused by a host process
+    assert not procmap.pid_in_container(9, cid, tmp_path)  # ended

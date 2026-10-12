@@ -213,7 +213,7 @@ class Inline:
         pass
 
 
-def make_controller(tmp_path: Path, procs, handler=True):
+def make_controller(tmp_path: Path, procs, handler=True, gone=()):
     gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
     owner = OwnerContainer("o" * 64, 0, ("GPU-0",))
     spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0")
@@ -225,7 +225,7 @@ def make_controller(tmp_path: Path, procs, handler=True):
     fake = FakeGpus(gpus, procs)
     ck = FakeCkpt()
     c = Controller(cfg, fake, FakeSessions([owner], [spot]), checkpointer=ck, workers=Inline(),
-                   handler_check=lambda pid: handler)
+                   handler_check=lambda pid: handler, pid_check=lambda pid, cid: pid not in gone)
     c.start()
     return c, fake, ck
 
@@ -777,3 +777,72 @@ def test_status_lists_when_each_spot_was_first_seen(tmp_path):
     c.write_status(tmp_path / "status.json", 9)
     st = parse_status((tmp_path / "status.json").read_text(), 9)
     assert st["GPU-0"].spots == ((1.0, 7.0),)
+
+
+def test_restore_skips_parked_processes_that_ended(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    gone: set[int] = set()
+    c, fake, ck = make_controller(tmp_path, procs, handler=False, gone=gone)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0] += [(20, 10 * GiB, 90, SPOT), (21, 10 * GiB, 90, SPOT)]
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    assert ck.calls == [("park", (20, 21))]
+    del procs[0][1:]
+    c.tick(85)
+    gone.add(20)  # one of them ends while parked
+    c.tick(86)
+    assert c.parked[SPOT].pids == (21,)
+    assert json.loads((tmp_path / "parked.json").read_text())[0]["pids"] == [21]
+    procs[2] = []
+    for t in (90, 160):
+        c.tick(t)
+    assert ("restore", (21,), "GPU-0", "GPU-2") in ck.calls
+    assert not any(call[0] == "restore" and 20 in call[1] for call in ck.calls)
+    c.tick(165)
+    assert c.parked == {}
+
+
+def test_parked_record_is_forgotten_when_every_process_ended(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    gone: set[int] = set()
+    c, fake, ck = make_controller(tmp_path, procs, handler=False, gone=gone)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 10 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    procs[0].pop()
+    c.tick(85)
+    assert SPOT in c.parked
+    gone.add(20)
+    procs[2] = []
+    for t in (90, 160):
+        c.tick(t)
+    assert c.parked == {} and json.loads((tmp_path / "parked.json").read_text()) == []
+    assert not any(call[0] == "restore" for call in ck.calls)
+
+
+def test_held_record_drops_processes_that_ended(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)]}
+    gone: set[int] = set()
+    c, fake, ck = make_controller(tmp_path, procs, gone=gone)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 20 * GiB, 90, SPOT))
+    procs[1] = [(30, 10 * GiB, 90, SPOT)]
+    procs[1].append((31, 10 * GiB, 90, SPOT))
+    c.tick(80)
+    procs[1] = []
+    c.tick(85)
+    assert c.held[SPOT].pids == (30, 31)
+    gone.add(30)
+    c.tick(90)
+    assert c.held[SPOT].pids == (31,)
+    gone.add(31)
+    c.tick(95)
+    assert SPOT not in c.held

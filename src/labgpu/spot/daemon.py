@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
+from ..procmap import pid_in_container
 from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, device_minor, has_handler
 from .config import Config
 from .detector import GpuTracker
@@ -83,6 +84,7 @@ class Controller:
         checkpointer: CudaCheckpoint | None = None,
         workers: ThreadPoolExecutor | None = None,
         handler_check: Callable[[int], bool] | None = None,
+        pid_check: Callable[[int, str], bool] | None = None,
     ) -> None:
         self.cfg = cfg
         self.gpus = gpus
@@ -108,6 +110,7 @@ class Controller:
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
         self.handler_check = handler_check or (lambda pid: has_handler(pid, OOM_SIGNAL))
+        self.pid_check = pid_check or pid_in_container
         self.can_checkpoint = False
         self.workers = workers or ThreadPoolExecutor(max_workers=4, thread_name_prefix="spot-op")
         self._parked_path = cfg.controller.state_dir / "parked.json"
@@ -297,6 +300,7 @@ class Controller:
             log.info("parked spot %s is gone", cid[:12])
             del self.parked[cid]
             self._save_parked()
+        self._prune_parked()
         # Forget the OOM time of sessions that left their GPU (moved, parked, or finished).
         on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
         for c in [c for c in self.oomed if c not in on_gpu and c not in self.busy]:
@@ -315,6 +319,27 @@ class Controller:
         for action in actions:
             self._dispatch(action, now)
         self._gate_new(spots)
+
+    def _prune_parked(self) -> None:
+        """Drop recorded processes that ended (or whose PID was reused) while parked (SPEC 2.12 rule 5-1)."""
+        changed = False
+        for records in (self.parked, self.held):
+            for cid, record in list(records.items()):
+                if cid in self.busy:
+                    continue
+                alive = tuple(p for p in record.pids if self.pid_check(p, cid))
+                if alive == record.pids:
+                    continue
+                changed = True
+                gone = tuple(p for p in record.pids if p not in alive)
+                if alive:
+                    log.info("spot %s: parked pids %s ended, keeping %s", cid[:12], gone, alive)
+                    records[cid] = replace(record, pids=alive)
+                else:
+                    log.info("spot %s: every parked pid %s ended, forgetting the record", cid[:12], gone)
+                    del records[cid]
+        if changed:
+            self._save_parked()
 
     def _gate(self, cid: str, allow: Sequence[str] = (), deny: Sequence[str] = ()) -> None:
         """chmod the containers' /dev/nvidia<minor> files (SPEC 2.12 rule 10); unknown minors skipped."""
