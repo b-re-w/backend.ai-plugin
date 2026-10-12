@@ -27,7 +27,7 @@ class ControllerConfig:
 
 @dataclass(frozen=True)
 class IdleConfig:
-    idle_minutes: float = 30.0
+    idle_minutes: float = 10.0
     owner_util_threshold: int = 5
     owner_mem_delta_mib: int = 512
     owner_cpu_threshold: float = 0.5

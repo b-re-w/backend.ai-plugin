@@ -247,7 +247,7 @@ GPU가 없거나 다른 구성의 서버를 흉내 낼 때 씁니다.
 ### 2.2 감시기 설정
 
 Backend.AI의 다른 플러그인 설정처럼 **etcd**에 둡니다. 감시기를 띄우는 스팟 플러그인의 설정 아래
-`monitor/<구역>/<키>`입니다(예: `config/plugins/accelerator/gpu_spot_1/monitor/idle/idle_minutes` = `"30"`).
+`monitor/<구역>/<키>`입니다(예: `config/plugins/accelerator/gpu_spot_1/monitor/idle/idle_minutes` = `"10"`).
 값은 모두 문자열로 넣으며, 목록(`ignored_processes`)은 쉼표로 구분합니다. 넣지 않은 키는 아래 기본값입니다.
 개발용 `labgpu-spot` CLI는 같은 구역을 TOML 파일(`-c`)로도 읽습니다.
 
@@ -257,7 +257,7 @@ poll_interval = 5            # 초
 state_dir = "<var-base-path>/labgpu"   # 기본값: agent의 [agent] var-base-path 아래 (2.13)
 
 [idle]
-idle_minutes = 30            # 소유자가 이만큼 연속으로 쉬어야 빌려줌
+idle_minutes = 10            # 소유자가 이만큼 연속으로 쉬어야 빌려줌 (사용자 결정 2026-10-12, 이전 30)
 owner_util_threshold = 5     # %, 소유자 프로세스 SM 사용률 합이 이 값을 넘으면 활동
 owner_mem_delta_mib = 512    # 소유자 GPU 메모리가 기준보다 이만큼 늘면 활동
 owner_cpu_threshold = 0.5    # 코어 수, 소유자 컨테이너 CPU 사용량이 넘으면 활동 (0이면 끔)
