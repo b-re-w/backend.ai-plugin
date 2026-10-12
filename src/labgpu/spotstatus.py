@@ -39,7 +39,8 @@ class SessionLending:
 
 
 # Spot session states and the numbers they are reported as (SPEC 2.14).
-SPOT_SESSION_CODES = {"running": 1, "idle": 2, "parked": 3, "held": 4, "oom": 5}
+# Powers of two: the mean of two different codes (duplicate series after a restart) is never a code.
+SPOT_SESSION_CODES = {"running": 1, "idle": 2, "parked": 4, "held": 8, "oom": 16}
 
 
 @dataclass(frozen=True)

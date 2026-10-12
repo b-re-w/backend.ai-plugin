@@ -320,7 +320,7 @@ def test_spot_plugin_reports_each_spot_sessions_state(fake_primary, tmp_path):
     spot._spot_uuids_of = fake_uuids_of
     measures = {str(m.key): m for m in asyncio.run(spot.gather_container_measures(None, [s1, s2, s3]))}
     state = measures["pro6000-spot_spot_state"].per_container
-    assert (state[s1].value, state[s1].capacity) == (3, 1) and state[s2].value == 1 and s3 not in state
+    assert (state[s1].value, state[s1].capacity) == (4, 1) and state[s2].value == 1 and s3 not in state
     assert int(measures["pro6000-spot_spot_since"].per_container[s1].value) == int(now - 300)
 
     status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale: report nothing
