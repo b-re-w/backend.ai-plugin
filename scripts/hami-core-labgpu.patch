@@ -1,17 +1,34 @@
+diff --git a/src/cuda/device.c b/src/cuda/device.c
+index ac1833a..62ddb8f 100755
+--- a/src/cuda/device.c
++++ b/src/cuda/device.c
+@@ -91,6 +91,11 @@ CUresult cuDeviceTotalMem_v2 ( size_t* bytes, CUdevice dev ) {
+     LOG_DEBUG("into cuDeviceTotalMem");
+     ENSURE_INITIALIZED();
+     size_t limit = get_current_device_memory_limit(dev);
++    if (limit == 0) {
++        /* No CUDA_DEVICE_MEMORY_LIMIT for this device (whole-GPU session):
++           report the real total instead of 0, as cuMemGetInfo_v2 does. */
++        return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
++    }
+     *bytes = limit;
+     return CUDA_SUCCESS;
+ }
 diff --git a/src/include/utils.h b/src/include/utils.h
-index 29326b3..d4248ee 100644
+index 29326b3..9e71317 100644
 --- a/src/include/utils.h
 +++ b/src/include/utils.h
-@@ -20,3 +20,4 @@ void sort(int vmap[16]);
+@@ -20,3 +20,5 @@ void sort(int vmap[16]);
  int initial_virtual_devices();
  int parser(char *str);
  int need_cuda_virtualize();
 +int labgpu_map_visible_uuids(int in_nvml_init);
++int labgpu_map_visible_indices(void);
 diff --git a/src/nvml/hook.c b/src/nvml/hook.c
-index 26519fb..8fe2262 100644
+index 26519fb..9ecb4dd 100644
 --- a/src/nvml/hook.c
 +++ b/src/nvml/hook.c
-@@ -312,8 +312,57 @@ void nvml_preInit() {
+@@ -312,8 +312,104 @@ void nvml_preInit() {
      }   
  }
  
@@ -62,14 +79,61 @@ index 26519fb..8fe2262 100644
 +    return count;
 +}
 +
++/*
++ * labgpu: a CUDA_VISIBLE_DEVICES list of indices ("1", "0,1"). Each entry is the NVML index the
++ * CUDA index at its position runs on; CUDA indices beyond the list map to nothing (-1). Returns
++ * the count, or -1 (map untouched) when the variable is unset, empty or not all indices.
++ */
++int labgpu_map_visible_indices(void) {
++    char *env = getenv("CUDA_VISIBLE_DEVICES");
++    if (env == NULL || env[0] == 0) {
++        return -1;
++    }
++    int mapped[CUDA_DEVICE_MAX_COUNT];
++    int count = 0;
++    const char *p = env;
++    while (*p) {
++        if (*p < '0' || *p > '9' || count >= CUDA_DEVICE_MAX_COUNT) {
++            return -1;
++        }
++        int index = 0;
++        while (*p >= '0' && *p <= '9') {
++            index = index * 10 + (*p - '0');
++            p++;
++        }
++        if (index >= CUDA_DEVICE_MAX_COUNT || (*p != ',' && *p != 0)) {
++            return -1;
++        }
++        mapped[count++] = index;
++        if (*p == ',') {
++            p++;
++        }
++    }
++    for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
++        cuda_to_nvml_map_array[i] = (i < count) ? mapped[i] : -1;
++    }
++    for (int i = 0; i < count; i++) {
++        LOG_INFO("labgpu: device %d -> nvml %d", i, cuda_to_nvml_map_array[i]);
++    }
++    return count;
++}
++
  void nvml_postInit() {
      init_device_info();
-+    /* labgpu: NVML-only programs (nvidia-smi) never run the CUDA-side mapping. */
-+    labgpu_map_visible_uuids(1);
++    /*
++     * labgpu: nvml_preInit above reset the CUDA -> NVML map to identity. NVML-only programs
++     * (nvidia-smi) never ran the CUDA-side mapping, and a CUDA program's own init calls nvmlInit
++     * right after mapping (set_task_pid), so map CUDA_VISIBLE_DEVICES again here: GPU UUIDs or
++     * indices. Without the second case a program with CUDA_VISIBLE_DEVICES=1 counted its memory
++     * on GPU 0 (2026-10-13 Primary).
++     */
++    if (labgpu_map_visible_uuids(1) < 0) {
++        labgpu_map_visible_indices();
++    }
  }
  
  nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
-@@ -338,6 +387,20 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
+@@ -338,6 +434,20 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
      CHECK_NVML_API(nvmlDeviceGetIndex(device, &dev_id));
      int cudadev = nvml_to_cuda_map(dev_id);
      if (cudadev < 0) {
@@ -108,18 +172,3 @@ index 98e2f28..30c6561 100755
      for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
          cuda_to_nvml_map_array[i] = i;
      }
-diff --git a/src/cuda/device.c b/src/cuda/device.c
---- a/src/cuda/device.c
-+++ b/src/cuda/device.c
-@@ -91,6 +91,11 @@ CUresult cuDeviceTotalMem_v2 ( size_t* bytes, CUdevice dev ) {
-     LOG_DEBUG("into cuDeviceTotalMem");
-     ENSURE_INITIALIZED();
-     size_t limit = get_current_device_memory_limit(dev);
-+    if (limit == 0) {
-+        /* No CUDA_DEVICE_MEMORY_LIMIT for this device (whole-GPU session):
-+           report the real total instead of 0, as cuMemGetInfo_v2 does. */
-+        return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
-+    }
-     *bytes = limit;
-     return CUDA_SUCCESS;
- }
