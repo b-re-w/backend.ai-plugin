@@ -608,10 +608,35 @@ class Controller:
                 for c, r in self.held.items()
             ],
             "busy": {c[:12]: op for c, op in self.busy.items()},
+            "spot_sessions": self._spot_sessions(),
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(status, indent=2))
         os.replace(tmp, path)
+
+    def _spot_sessions(self) -> dict[str, dict]:
+        """What each known spot session is going through, for its user (SPEC 2.9.1, 2.14)."""
+        on_gpu: dict[str, str] = {}
+        for o in self.last_obs.values():
+            for c in o.spot_containers:
+                on_gpu.setdefault(c, o.uuid)
+        out: dict[str, dict] = {}
+        for cid in sorted(set(self.spot_info) | set(self.parked) | set(self.held)):
+            if cid in self.held:
+                r = self.held[cid]
+                entry = {"state": "held", "gpu": r.spot.src, "since": r.spot.since}
+            elif cid in self.parked:
+                r = self.parked[cid]
+                entry = {"state": "parked", "gpu": r.spot.src, "since": r.spot.since}
+            elif cid in on_gpu and cid in self.oomed:
+                entry = {"state": "oom", "gpu": on_gpu[cid], "since": self.oomed[cid]}
+            elif cid in on_gpu:
+                gpu = on_gpu[cid]
+                entry = {"state": "running", "gpu": gpu, "since": self.spot_seen.get((cid, gpu))}
+            else:
+                entry = {"state": "idle", "gpu": self.assigned.get(cid), "since": None}
+            out[cid[:12]] = entry
+        return out
 
 
 def _loop(controller: Controller, stop: threading.Event, clock: Callable[[], float]) -> None:

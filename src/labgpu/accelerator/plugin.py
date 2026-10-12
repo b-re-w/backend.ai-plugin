@@ -541,7 +541,7 @@ class LabGpuPlugin(AbstractComputePlugin):
         ]
 
     async def _lending_measures(self, container_ids: Sequence[str]) -> list[ContainerMeasurement]:
-        """`<key>_lent` and `<key>_lent_since` per session (SPEC 1.13); nothing if status is unknown."""
+        """`<key>_lent`, `<key>_lent_since`, `<key>_lendable` per session (SPEC 1.13); nothing if status is unknown."""
         if not self.enabled or not container_ids:
             return []
         status = await asyncio.to_thread(
@@ -572,6 +572,15 @@ class LabGpuPlugin(AbstractComputePlugin):
                     # capacity 1 lets readers undo the manager summing duplicate series
                     # after agent restarts (SPEC 1.13)
                     cid: Measurement(Decimal(int(f.since)), Decimal(1)) for cid, f in figures.items()
+                },
+            ),
+            ContainerMeasurement(
+                MetricKey(f"{self.key}_lendable"),
+                MetricTypes.GAUGE,
+                unit_hint="count",
+                stats_filter=frozenset({"max"}),
+                per_container={
+                    cid: Measurement(Decimal(f.lendable), Decimal(f.total)) for cid, f in figures.items()
                 },
             ),
         ]

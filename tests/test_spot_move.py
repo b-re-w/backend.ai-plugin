@@ -846,3 +846,26 @@ def test_held_record_drops_processes_that_ended(tmp_path):
     gone.add(31)
     c.tick(95)
     assert SPOT not in c.held
+
+
+def test_status_tells_each_spot_session_what_it_is_going_through(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs, handler=False)
+    for t in (0, 61, 70):
+        c.tick(t)
+    c.write_status(tmp_path / "status.json", 70)
+    sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
+    assert sessions == {SPOT[:12]: {"state": "idle", "gpu": "GPU-0", "since": None}}
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(75)
+    c.write_status(tmp_path / "status.json", 75)
+    sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
+    assert sessions[SPOT[:12]] == {"state": "running", "gpu": "GPU-0", "since": 75}
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)  # owner back, nowhere to go: parked
+    c.tick(80)
+    procs[0].pop()
+    c.tick(85)
+    c.write_status(tmp_path / "status.json", 85)
+    sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
+    assert sessions[SPOT[:12]] == {"state": "parked", "gpu": "GPU-0", "since": 80}

@@ -29,6 +29,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import aiodocker
+from aiodocker.exceptions import DockerError
+
 from ai.backend.agent.resources import (
     AbstractAllocMap,
     AbstractComputePlugin,
@@ -37,6 +40,8 @@ from ai.backend.agent.resources import (
 )
 from ai.backend.agent.stats import (
     ContainerMeasurement,
+    Measurement,
+    MetricTypes,
     NodeMeasurement,
     ProcessMeasurement,
     StatContext,
@@ -47,6 +52,7 @@ from ai.backend.common.types import (
     DeviceId,
     DeviceModelInfo,
     DeviceName,
+    MetricKey,
     MountTypes,
     SlotName,
     SlotTypes,
@@ -107,6 +113,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     hook_path: Path = default_hook_path()
     cuda_checkpoint: Path = Path("cuda-checkpoint")
     _handed_out: list[tuple[str, float, float]] | None = None  # (GPU uuid, when, share) handed to new sessions
+    _container_uuids: dict[str, list[str]] | None = None  # container -> its LABGPU_SPOT_UUIDS
 
     @property
     def slot(self) -> SlotName:
@@ -400,7 +407,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             "display_icon": "gpu1",
         }
 
-    # ---- statistics: GPU usage of spot sessions is reported by the owner-side plugin ----
+    # ---- statistics: GPU usage of spot sessions is reported by the owner-side plugin (SPEC 1.9);
+    # this plugin only reports what each spot session is going through (SPEC 2.14) ----
 
     async def gather_node_measures(self, ctx: StatContext) -> Sequence[NodeMeasurement]:
         return []
@@ -408,7 +416,56 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     async def gather_container_measures(
         self, ctx: StatContext, container_ids: Sequence[str]
     ) -> Sequence[ContainerMeasurement]:
-        return []
+        if not self.enabled or not container_ids:
+            return []
+        states = await asyncio.to_thread(
+            spotstatus.read_spot_sessions, self.spot_status_path, time.time(), self.spot_status_max_age
+        )
+        if not states:
+            return []
+        own = {g.uuid for g in self._gpus or []}
+        figures = spotstatus.spot_session_states(await self._spot_uuids_of(container_ids), own, states)
+        if not figures:
+            return []
+        # capacity 1 lets readers undo the manager summing duplicate series after agent restarts
+        return [
+            ContainerMeasurement(
+                MetricKey(f"{self.key}_spot_state"),
+                MetricTypes.GAUGE,
+                unit_hint="count",
+                stats_filter=frozenset(),
+                per_container={
+                    cid: Measurement(Decimal(spotstatus.SPOT_SESSION_CODES[f.state]), Decimal(1))
+                    for cid, f in figures.items()
+                },
+            ),
+            ContainerMeasurement(
+                MetricKey(f"{self.key}_spot_since"),
+                MetricTypes.GAUGE,
+                unit_hint="count",
+                stats_filter=frozenset(),
+                per_container={cid: Measurement(Decimal(int(f.since)), Decimal(1)) for cid, f in figures.items()},
+            ),
+        ]
+
+    async def _spot_uuids_of(self, container_ids: Sequence[str]) -> dict[str, list[str]]:
+        """Container id -> GPUs it may be moved between (LABGPU_SPOT_UUIDS); each container is inspected once."""
+        cache = self._container_uuids if self._container_uuids is not None else {}
+        missing = [cid for cid in container_ids if cid not in cache]
+        if missing:
+            try:
+                async with aiodocker.Docker() as docker:
+                    for cid in missing:
+                        try:
+                            container = await docker.containers.get(cid)
+                            env = ((await container.show()).get("Config") or {}).get("Env") or []
+                        except DockerError:
+                            env = []
+                        cache[cid] = spotstatus.uuids_from_env(env, ENV_SPOT_UUIDS)
+            except DockerError as e:
+                log.warning("[%s] cannot inspect containers for spot states: %r", self.entry_name, e)
+        self._container_uuids = {cid: cache[cid] for cid in container_ids if cid in cache}
+        return self._container_uuids
 
     async def gather_process_measures(
         self, ctx: StatContext, pid_map: Mapping[int, str]

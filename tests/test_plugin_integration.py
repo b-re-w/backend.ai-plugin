@@ -240,6 +240,8 @@ def test_lending_measures_per_session(fake_primary, tmp_path):
     assert "c3" not in lent  # the A6000 belongs to another plugin
     assert int(measures["pro6000_lent_since"].per_container["c1"].value) == int(now - 600)
     assert measures["pro6000_lent_since"].per_container["c1"].capacity == 1
+    lendable = measures["pro6000_lendable"].per_container
+    assert (lendable["c1"].value, lendable["c1"].capacity) == (0, 1)  # older status: no state
 
     status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale file
     keys = {str(m.key) for m in asyncio.run(p.gather_container_measures(None, ["c1"]))}
@@ -295,3 +297,31 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     assert meta["number_format"]["round_length"] == 2
     assert meta["human_readable_name"] == "PRO6000 Spot"
     assert asyncio.run(spot.generate_docker_args(None, {})) == {}
+
+
+def test_spot_plugin_reports_each_spot_sessions_state(fake_primary, tmp_path):
+    import time
+
+    from labgpu.accelerator.spot_plugin import SpotSlotPlugin1
+
+    status = tmp_path / "status.json"
+    now = time.time()
+    status.write_text(json.dumps({"updated_at": now, "gpus": [], "spot_sessions": {
+        "s1s1s1s1s1s1": {"state": "parked", "gpu": "GPU-p6000-1", "since": now - 300},
+        "s2s2s2s2s2s2": {"state": "running", "gpu": "GPU-p6000-2", "since": now - 60},
+    }}))
+    spot = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
+                       spot_status_path=str(status), monitor_enabled="false")
+    s1, s2, s3 = "s1s1s1s1s1s1" + "0" * 52, "s2s2s2s2s2s2" + "0" * 52, "s3" * 32
+
+    async def fake_uuids_of(container_ids):
+        return {s1: ["GPU-p6000-1", "GPU-p6000-2"], s2: ["GPU-p6000-1", "GPU-p6000-2"], s3: []}
+
+    spot._spot_uuids_of = fake_uuids_of
+    measures = {str(m.key): m for m in asyncio.run(spot.gather_container_measures(None, [s1, s2, s3]))}
+    state = measures["pro6000-spot_spot_state"].per_container
+    assert (state[s1].value, state[s1].capacity) == (3, 1) and state[s2].value == 1 and s3 not in state
+    assert int(measures["pro6000-spot_spot_since"].per_container[s1].value) == int(now - 300)
+
+    status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale: report nothing
+    assert asyncio.run(spot.gather_container_measures(None, [s1])) == []

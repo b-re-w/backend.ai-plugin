@@ -1,6 +1,14 @@
 import json
 
-from labgpu.spotstatus import GpuLending, parse_status, session_lending, uuids_from_env
+from labgpu.spotstatus import (
+    GpuLending,
+    SpotSessionState,
+    parse_spot_sessions,
+    parse_status,
+    session_lending,
+    spot_session_states,
+    uuids_from_env,
+)
 
 NOW = 1_000_000.0
 
@@ -41,3 +49,41 @@ def test_session_lending_counts_only_own_gpus():
 def test_uuids_from_env():
     assert uuids_from_env(["PATH=/bin", "LABGPU_DEVICE_UUIDS=GPU-a,GPU-b"]) == ["GPU-a", "GPU-b"]
     assert uuids_from_env(["PATH=/bin"]) == []
+
+
+def test_session_lending_counts_gpus_that_could_take_a_spot():
+    st = {"GPU-a": GpuLending(True, NOW - 600, "LENT"), "GPU-b": GpuLending(False, None, "LENDABLE"),
+          "GPU-c": GpuLending(False, None, "BUSY"), "GPU-d": GpuLending(False, None, "")}  # "" = spot off
+    f = session_lending({"c1": ["GPU-a", "GPU-b", "GPU-c", "GPU-d"]}, {"GPU-a", "GPU-b", "GPU-c", "GPU-d"}, st)["c1"]
+    assert (f.lent, f.lendable, f.total) == (1, 2, 4)
+
+
+def test_uuids_from_env_reads_the_spot_list_too():
+    env = ["LABGPU_SPOT_UUIDS=GPU-a,GPU-b", "LABGPU_DEVICE_UUIDS=GPU-x"]
+    assert uuids_from_env(env, "LABGPU_SPOT_UUIDS") == ["GPU-a", "GPU-b"]
+
+
+def test_parse_spot_sessions():
+    text = json.dumps({"updated_at": NOW - 5, "gpus": [], "spot_sessions": {
+        "aaaaaaaaaaaa": {"state": "parked", "gpu": "GPU-a", "since": NOW - 300},
+        "bbbbbbbbbbbb": {"state": "idle", "gpu": "GPU-a", "since": None},
+        "cccccccccccc": {"state": "dancing"},  # unknown state: skipped
+    }})
+    assert parse_spot_sessions(text, NOW) == {
+        "aaaaaaaaaaaa": SpotSessionState("parked", NOW - 300),
+        "bbbbbbbbbbbb": SpotSessionState("idle", 0.0),
+    }
+    assert parse_spot_sessions(json.dumps({"updated_at": NOW - 5, "gpus": []}), NOW) == {}  # older monitor
+    assert parse_spot_sessions(json.dumps({"updated_at": NOW - 61, "spot_sessions": {}}), NOW) is None
+    assert parse_spot_sessions("not json", NOW) is None
+
+
+def test_spot_session_states_only_for_this_model():
+    states = {"a" * 12: SpotSessionState("running", NOW - 60), "b" * 12: SpotSessionState("parked", NOW - 9)}
+    got = spot_session_states(
+        {"a" * 64: ["GPU-a", "GPU-b"], "b" * 64: ["GPU-x"], "c" * 64: ["GPU-a"], "d" * 64: []},
+        own_uuids={"GPU-a", "GPU-b"},
+        states=states,
+    )
+    # b runs on another model's GPUs, c is not known to the monitor yet, d is not a spot session
+    assert got == {"a" * 64: SpotSessionState("running", NOW - 60)}

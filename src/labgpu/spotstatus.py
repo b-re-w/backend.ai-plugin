@@ -35,6 +35,17 @@ class SessionLending:
     lent: int  # how many of the session's GPUs are lent right now
     total: int  # how many GPUs of this plugin the session holds
     since: float  # earliest lend start (unix seconds), 0 when nothing is lent
+    lendable: int = 0  # how many of them could take a spot session right now (LENDABLE or LENT)
+
+
+# Spot session states and the numbers they are reported as (SPEC 2.14).
+SPOT_SESSION_CODES = {"running": 1, "idle": 2, "parked": 3, "held": 4, "oom": 5}
+
+
+@dataclass(frozen=True)
+class SpotSessionState:
+    state: str
+    since: float  # unix seconds it entered the state, 0 when unknown
 
 
 def parse_status(text: str, now: float, max_age: float = DEFAULT_MAX_AGE) -> dict[str, GpuLending] | None:
@@ -77,6 +88,35 @@ def read_status(path: Path, now: float, max_age: float = DEFAULT_MAX_AGE) -> dic
         return None
 
 
+def parse_spot_sessions(
+    text: str, now: float, max_age: float = DEFAULT_MAX_AGE
+) -> dict[str, SpotSessionState] | None:
+    """Container ID prefix (12) -> spot session state, or None when the file is stale or malformed."""
+    try:
+        data = json.loads(text)
+        updated = float(data["updated_at"])
+        sessions = data.get("spot_sessions") or {}
+    except (ValueError, KeyError, TypeError):
+        return None
+    if now - updated > max_age or not isinstance(sessions, dict):
+        return None
+    result: dict[str, SpotSessionState] = {}
+    for cid, entry in sessions.items():
+        if not isinstance(entry, dict) or entry.get("state") not in SPOT_SESSION_CODES:
+            continue
+        result[str(cid)[:12]] = SpotSessionState(str(entry["state"]), float(entry.get("since") or 0.0))
+    return result
+
+
+def read_spot_sessions(
+    path: Path, now: float, max_age: float = DEFAULT_MAX_AGE
+) -> dict[str, SpotSessionState] | None:
+    try:
+        return parse_spot_sessions(path.read_text(), now, max_age)
+    except OSError:
+        return None
+
+
 def session_lending(
     uuids_by_container: Mapping[str, Iterable[str]],
     own_uuids: Collection[str],
@@ -93,7 +133,29 @@ def session_lending(
             continue
         lent = [status[u] for u in mine if u in status and status[u].lent]
         starts = [g.since for g in lent if g.since]
-        result[cid] = SessionLending(lent=len(lent), total=len(mine), since=min(starts) if starts else 0.0)
+        lendable = sum(1 for u in mine if u in status and status[u].state in SPOT_STATES)
+        result[cid] = SessionLending(
+            lent=len(lent), total=len(mine), since=min(starts) if starts else 0.0, lendable=lendable
+        )
+    return result
+
+
+def spot_session_states(
+    uuids_by_container: Mapping[str, Iterable[str]],
+    own_uuids: Collection[str],
+    states: Mapping[str, SpotSessionState],
+) -> dict[str, SpotSessionState]:
+    """
+    States of the spot sessions of this plugin's GPU model (their LABGPU_SPOT_UUIDS name one of
+    its GPUs) that the monitor lists; sessions it does not know yet are left out (SPEC 2.14).
+    """
+    result: dict[str, SpotSessionState] = {}
+    for cid, uuids in uuids_by_container.items():
+        if not any(u in own_uuids for u in uuids):
+            continue
+        state = states.get(cid[:12])
+        if state is not None:
+            result[cid] = state
     return result
 
 
@@ -173,10 +235,10 @@ def roomiest_spot_gpu(
     return u, capacity, left
 
 
-def uuids_from_env(env: Iterable[str]) -> list[str]:
-    """The GPUs a session holds, from its container env (LABGPU_DEVICE_UUIDS=...)."""
+def uuids_from_env(env: Iterable[str], name: str = "LABGPU_DEVICE_UUIDS") -> list[str]:
+    """The GPUs a session holds (or, with LABGPU_SPOT_UUIDS, a spot session may use), from its env."""
     for item in env:
         key, _, value = item.partition("=")
-        if key == "LABGPU_DEVICE_UUIDS":
+        if key == name:
             return [u for u in value.split(",") if u]
     return []
