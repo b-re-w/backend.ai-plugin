@@ -60,7 +60,7 @@ from ai.backend.common.types import (
 
 from .. import __version__, devalloc, spotstatus
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
-from ..fraction import MEMORY_SHARED_CACHE
+from ..fraction import HAMI_LOG_LEVEL, MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
 from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT, OOM_SIGNAL
 from ..selection import GpuSelector, key_label, validate_key
@@ -314,6 +314,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             "LABGPU_SPOT_CAP": str(max(cap // MiB, 1)),
             "CUDA_VISIBLE_DEVICES": chosen,
             "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
+            "LIBCUDA_LOG_LEVEL": HAMI_LOG_LEVEL,
             # SPEC 2.12: the out-of-memory error for a session that cannot be moved.
             "PYTHONPATH": CONTAINER_PYTHON_DIR,
             "BASH_ENV": CONTAINER_PROFILE,

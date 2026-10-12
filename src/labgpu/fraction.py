@@ -15,6 +15,8 @@ from .devalloc import device_sort_key
 from .sizes import MiB
 
 MEMORY_SHARED_CACHE = "/tmp/labgpu-vgpu.cache"
+# HAMi-core log level: errors only (its default 2 prints notices from every GPU program, SPEC 1.7).
+HAMI_LOG_LEVEL = "1"
 
 
 @dataclass(frozen=True)
@@ -83,13 +85,16 @@ def build_hami_environ(limits: Sequence[DeviceLimit], *, sm_limit: bool) -> dict
     its attached GPUs renumbered from zero. HAMi-core takes a single global SM limit, so the
     largest per-device limit is used.
     """
-    env: dict[str, str] = {}
+    # HAMi-core is loaded for whole-GPU sessions too, so these go everywhere (SPEC 1.7).
+    env: dict[str, str] = {
+        "CUDA_DEVICE_MEMORY_SHARED_CACHE": MEMORY_SHARED_CACHE,
+        "LIBCUDA_LOG_LEVEL": HAMI_LOG_LEVEL,
+    }
     fractional = [lim for lim in limits if not lim.is_whole]
     for lim in fractional:
         assert lim.memory_limit_bytes is not None
         env[f"CUDA_DEVICE_MEMORY_LIMIT_{lim.local_index}"] = f"{lim.memory_limit_bytes // MiB}m"
     if fractional:
-        env["CUDA_DEVICE_MEMORY_SHARED_CACHE"] = MEMORY_SHARED_CACHE
         if sm_limit:
             env["CUDA_DEVICE_SM_LIMIT"] = str(
                 max(lim.sm_limit_percent or 100 for lim in fractional)

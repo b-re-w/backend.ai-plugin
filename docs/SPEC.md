@@ -109,7 +109,11 @@ etcd 값은 모두 문자열로 들어오므로 문자열로 파싱합니다.
   - fractional 모드에서 제한이 필요한 장치마다 `CUDA_DEVICE_MEMORY_LIMIT_<local_idx>=<MiB>m`
   - `sm_limit=true`이고 제한이 필요한 장치가 있으면 `CUDA_DEVICE_SM_LIMIT=<제한 장치들 중 최댓값>`
     (HAMi-core는 SM 제한을 전역 값 하나로 받습니다. 실제 노드에서 확인 필요)
-  - `CUDA_DEVICE_MEMORY_SHARED_CACHE=/tmp/labgpu-vgpu.cache`
+  - HAMi-core를 넣을 때(fractional 모드, 강제 가능)는 GPU를 한 장 단위로 받은 세션에도 늘
+    `CUDA_DEVICE_MEMORY_SHARED_CACHE=/tmp/labgpu-vgpu.cache`와 `LIBCUDA_LOG_LEVEL=1`을 넣습니다(사용자 결정 2026-10-12).
+    HAMi-core는 컨테이너의 모든 GPU 프로그램(`nvidia-smi` 포함)에 올라오는데, 기본 로그 단계(2)는 실행할 때마다
+    "Initializing", "Cleanup on exit" 같은 안내와, 공유 파일 위치가 없으면 경고를 출력합니다. 1은 오류만 남깁니다.
+    HAMi-core의 한도 초과(`Device N OOM`)는 오류 단계라 그대로 보입니다. 사용자는 세션에서 이 값을 바꿔 다시 볼 수 있습니다.
 - 할당이 비어 있으면 빈 dict를 돌려줍니다.
 
 ### 1.8 훅 라이브러리 (`get_hooks`)
@@ -422,7 +426,7 @@ GPU에 스팟 프로세스가 있으면 LENT(회수 조건이 있으면 RECLAIMI
     `CUDA_VISIBLE_DEVICES`에 없어도 그리로 옮길 수 있습니다(2026-09-27 Primary 실측). `CUDA_DEVICE_MEMORY_LIMIT_1..`은
     1MiB로 둡니다(`nvidia-smi` 표시용, 2.12 규칙 6 참고).
   - 환경변수: `LABGPU_SPOT=1`, `LABGPU_SPOT_UUIDS`(붙인 GPU 전체), `LABGPU_SPOT_GPU`(고른 GPU),
-    `LABGPU_SPOT_SHARE`(받은 몫 `s`, 감시기가 자리 계산에 씀).
+    `LABGPU_SPOT_SHARE`(받은 몫 `s`, 감시기가 자리 계산에 씀). HAMi-core 로그는 주인 쪽과 같이 `LIBCUDA_LOG_LEVEL=1`(1.7).
     `DeviceRequests`에는 NVML 인덱스로 넣습니다.
   - HAMi-core(`hook_path`, 기본 `<체크아웃>/.venv/lib/libvgpu.so`)가 없으면 메모리를 제한할 수 없으므로
     ERROR를 남기고 스팟 플러그인을 끕니다(스팟 자리 0). 주인 우선 원칙입니다.

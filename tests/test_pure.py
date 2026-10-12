@@ -59,7 +59,12 @@ def test_mixed_allocation_env_uses_local_indices():
     assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "4096m"
     assert "CUDA_DEVICE_MEMORY_LIMIT_1" not in env
     assert env["CUDA_DEVICE_SM_LIMIT"] == "25"
-    assert build_hami_environ(limits[1:], sm_limit=True) == {}
+    assert env["LIBCUDA_LOG_LEVEL"] == "1"
+    # A whole GPU still loads HAMi-core: only the quiet logging and the shared cache file.
+    assert build_hami_environ(limits[1:], sm_limit=True) == {
+        "CUDA_DEVICE_MEMORY_SHARED_CACHE": "/tmp/labgpu-vgpu.cache",
+        "LIBCUDA_LOG_LEVEL": "1",
+    }
     assert "CUDA_DEVICE_SM_LIMIT" not in build_hami_environ(limits, sm_limit=False)
 
 
