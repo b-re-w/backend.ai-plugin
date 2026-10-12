@@ -37,6 +37,7 @@ class SpotContainer:
     gpu: str = ""  # the GPU the spot plugin gave it (LABGPU_SPOT_GPU at creation)
     share: float = 1.0  # its share of one GPU (LABGPU_SPOT_SHARE, SPEC 2.12)
     cap: int = 0  # memory limit the plugin gave it at creation, bytes (LABGPU_SPOT_CAP, MiB); 0 unknown
+    user: str = ""  # "uid:gid" of the session user (LOCAL_USER_ID / LOCAL_GROUP_ID), "" unknown
 
 
 def parse_share(value: str | None) -> float:
@@ -103,7 +104,13 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         gpu=env.get("LABGPU_SPOT_GPU", ""),
         share=parse_share(env.get("LABGPU_SPOT_SHARE")),
         cap=int(env["LABGPU_SPOT_CAP"]) << 20 if env.get("LABGPU_SPOT_CAP", "").isdigit() else 0,
+        user=_session_user(env),
     )
+
+
+def _session_user(env: Mapping[str, str]) -> str:
+    uid, gid = env.get("LOCAL_USER_ID", ""), env.get("LOCAL_GROUP_ID", "")
+    return f"{uid}:{gid or uid}" if uid.isdigit() and (not gid or gid.isdigit()) else ""
 
 
 def split_sessions(

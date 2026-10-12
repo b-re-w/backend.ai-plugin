@@ -23,6 +23,8 @@ DEFAULT_STATE_DIR = Path("./var/lib/backend.ai/labgpu")
 class ControllerConfig:
     poll_interval: float = 5.0
     state_dir: Path = DEFAULT_STATE_DIR
+    # A restart picks up the saved judgement only if it is at most this old (SPEC 2.10).
+    resume_max_age_seconds: float = 600.0
 
 
 @dataclass(frozen=True)

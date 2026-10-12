@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from labgpu.nvml import GpuInfo, GpuProcess, GpuSnapshot
 from labgpu.sizes import GiB
 from labgpu.spot.ckpt import device_map, driver_major
@@ -9,7 +11,18 @@ from labgpu.spot.daemon import Controller
 from labgpu.spot.docker import OwnerContainer, SpotContainer, split_sessions
 from labgpu.spot.model import GpuState, GpuVerdict, ProcKind
 from labgpu.spot.observer import observe
-from labgpu.spot.placement import Move, Oom, Park, ParkedSpot, Resize, Restore, RunningSpot, plan
+from labgpu.spot.placement import (
+    IdleSpot,
+    Move,
+    Oom,
+    Park,
+    ParkedSpot,
+    Rehome,
+    Resize,
+    Restore,
+    RunningSpot,
+    plan,
+)
 from labgpu.spotstatus import GpuLending, parse_status, pick_spot_gpu, roomiest_spot_gpu, spot_capacity, unreported
 
 P6K = "NVIDIA RTX PRO 6000"
@@ -201,6 +214,14 @@ class FakeCkpt:
     def place(self, cid, pid, order, size):
         self.calls.append(("place", pid, tuple(order), size))
 
+    def place_as(self, cid, user, order, size):
+        self.calls.append(("place_as", user, tuple(order), size))
+
+    spot_env: str | None = None  # what an earlier monitor left in /tmp/labgpu-spot-env
+
+    def read_spot_env(self, cid, user):
+        return self.spot_env
+
     def raise_oom(self, cid, pids, order, reason):
         self.calls.append(("oom", tuple(pids), tuple(order)))
 
@@ -216,7 +237,7 @@ class Inline:
 def make_controller(tmp_path: Path, procs, handler=True, gone=()):
     gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
     owner = OwnerContainer("o" * 64, 0, ("GPU-0",))
-    spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0")
+    spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0", user="1000:1000")
     cfg = Config(
         controller=ControllerConfig(state_dir=tmp_path),
         idle=IdleConfig(idle_minutes=1, owner_cpu_threshold=0),
@@ -747,12 +768,13 @@ def test_idle_spot_holds_its_share_but_never_pushes_a_running_one():
 def test_status_counts_a_spot_with_no_gpu_process_on_its_gpu(tmp_path):
     OWNER = "o" * 64
     c, fake, ck = make_controller(tmp_path, {0: [(10, 4 * GiB, 0, OWNER)]})
-    c.tick(0)
-    c.write_status(tmp_path / "status.json", 0)
+    for t in (0, 61, 70):  # the owner idles, so GPU-0 can host the spot it was given
+        c.tick(t)
+    c.write_status(tmp_path / "status.json", 70)
     gpus = {g["uuid"]: g for g in json.loads((tmp_path / "status.json").read_text())["gpus"]}
     assert gpus["GPU-0"]["spots"] == [{"container": "s" * 12, "share": 1.0, "seen": 0, "idle": True}]
     assert gpus["GPU-0"]["spot_share"] == 1.0 and gpus["GPU-1"]["spot_share"] == 0
-    assert parse_status((tmp_path / "status.json").read_text(), 0)["GPU-0"].spot_share == 1.0
+    assert parse_status((tmp_path / "status.json").read_text(), 70)["GPU-0"].spot_share == 1.0
 
 
 def test_a_handed_share_the_monitor_lists_is_not_counted_twice():
@@ -772,10 +794,10 @@ def test_a_handed_share_the_monitor_lists_is_not_counted_twice():
 
 def test_status_lists_when_each_spot_was_first_seen(tmp_path):
     c, fake, ck = make_controller(tmp_path, {0: [(10, 4 * GiB, 0, "o" * 64)]})
-    c.tick(7)
-    c.tick(9)
-    c.write_status(tmp_path / "status.json", 9)
-    st = parse_status((tmp_path / "status.json").read_text(), 9)
+    for t in (7, 70, 75):
+        c.tick(t)
+    c.write_status(tmp_path / "status.json", 75)
+    st = parse_status((tmp_path / "status.json").read_text(), 75)
     assert st["GPU-0"].spots == ((1.0, 7.0),)
 
 
@@ -869,3 +891,143 @@ def test_status_tells_each_spot_session_what_it_is_going_through(tmp_path):
     c.write_status(tmp_path / "status.json", 85)
     sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
     assert sessions[SPOT[:12]] == {"state": "parked", "gpu": "GPU-0", "since": 80}
+
+
+# ---- restart keeps the judgement (SPEC 2.10) ----
+
+def _lent_spot_on_gpu0(tmp_path, procs):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    c, fake, ck = make_controller(tmp_path, procs)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(80)
+    assert c.last_verdicts["GPU-0"].state is GpuState.LENT and ck.calls == []
+    return c, ck
+
+
+def test_restart_carries_on_without_taking_the_gpu_back(tmp_path):
+    procs = {0: [(10, 4 * GiB, 0, "o" * 64)]}
+    _lent_spot_on_gpu0(tmp_path, procs)
+    c2, fake2, ck2 = make_controller(tmp_path, procs)  # the agent restarts, 40 s of downtime
+    c2.tick(120)
+    assert c2.last_verdicts["GPU-0"].state is GpuState.LENT
+    assert c2.last_verdicts["GPU-0"].idle_for == pytest.approx(80 - 0)  # downtime is not idle time
+    assert ck2.calls == []  # the spot keeps running
+
+
+def test_restart_after_a_long_downtime_starts_every_gpu_as_just_used(tmp_path):
+    procs = {0: [(10, 4 * GiB, 0, "o" * 64)]}
+    _lent_spot_on_gpu0(tmp_path, procs)
+    c2, fake2, ck2 = make_controller(tmp_path, procs)
+    c2.tick(80 + 601)
+    assert c2.last_verdicts["GPU-0"].state is GpuState.RECLAIMING
+
+
+def test_an_owner_that_arrived_during_the_downtime_is_activity(tmp_path):
+    procs = {0: [(10, 4 * GiB, 0, "o" * 64)]}
+    _lent_spot_on_gpu0(tmp_path, procs)
+    c2, fake2, ck2 = make_controller(tmp_path, procs)
+    second = OwnerContainer("p" * 64, 0, ("GPU-0",))
+    c2.sessions.owners.append(second)
+    c2.tick(120)
+    v = c2.last_verdicts["GPU-0"]
+    assert v.must_reclaim and any("new owner" in r for r in v.reasons)
+
+
+def test_restart_remembers_where_a_spot_was_moved(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)]}
+    c, fake, ck = make_controller(tmp_path, procs)
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(80)
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(90)  # moved off GPU-0
+    dst = ck.calls[0][3]
+    procs[0].pop()
+    procs[int(dst[-1])] = [(20, 30 * GiB, 90, SPOT)]
+    c.tick(95)
+    assert c.assigned[SPOT] == dst
+    c2, fake2, ck2 = make_controller(tmp_path, procs)
+    c2.tick(100)
+    assert c2.assigned[SPOT] == dst and SPOT not in c2.held  # not mistaken for a GPU it was not given
+
+
+# ---- spot sessions with no GPU process get a usable GPU again (SPEC 2.12 rule 1-2) ----
+
+def test_idle_spot_on_a_gpu_that_cannot_host_it_is_rehomed():
+    verdicts = {"A": v("A", GpuState.BUSY), "B": v("B", GpuState.LENDABLE)}
+    spot = IdleSpot("s", "A", ("A", "B"))
+    assert plan(verdicts, [], [], now=10, can_checkpoint=True, oom_grace=10, idle_spots=[spot]) == [
+        Rehome("s", "A", "B")
+    ]
+    # Nowhere to go: it waits, holding no share on the owner's GPU.
+    verdicts["B"] = v("B", GpuState.BUSY)
+    assert plan(verdicts, [], [], now=10, can_checkpoint=True, oom_grace=10, idle_spots=[spot]) == []
+
+
+def test_idle_spot_left_at_1mib_by_an_oom_error_is_placed_again_even_on_its_own_gpu():
+    verdicts = {"A": v("A", GpuState.LENDABLE), "B": v("B", GpuState.BUSY)}
+    spot = IdleSpot("s", "A", ("A", "B"), limited=True)
+    assert plan(verdicts, [], [], now=10, can_checkpoint=True, oom_grace=10, idle_spots=[spot]) == [
+        Rehome("s", "A", "A")
+    ]
+
+
+def test_idle_spot_that_may_stay_still_holds_its_share():
+    verdicts = {"A": v("A", GpuState.LENDABLE), "B": v("B", GpuState.LENDABLE)}
+    idle = IdleSpot("i", "A", ("A", "B"))
+    running = [RunningSpot("s", frozenset({"A"}), ("A", "B"), 1)]
+    verdicts["A"] = v("A", GpuState.LENT, must=True, reasons=("owner back",))
+    # The running one must leave A; B is free, A's idle spot neither moves nor blocks it.
+    actions = plan(verdicts, running, [], now=10, can_checkpoint=True, oom_grace=10, idle_spots=[idle])
+    assert Move("s", "A", "B", "owner back") in actions
+
+
+def test_spot_left_at_1mib_after_an_oom_error_gets_a_free_gpu_back(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs)  # the program has the OOM handler
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)  # owner back, GPU-1/2 busy with strangers
+    c.tick(80)
+    assert ck.calls[-1][0] == "oom" and SPOT in c.limited
+    procs[0].pop()  # the program saved and exited after the error
+    c.tick(85)
+    c.write_status(tmp_path / "status.json", 85)
+    sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
+    assert sessions[SPOT[:12]] == {"state": "parked", "gpu": "GPU-0", "since": 85}
+    procs[2] = []  # GPU-2 frees up
+    for t in (90, 160):
+        c.tick(t)
+    place = [call for call in ck.calls if call[0] == "place_as"]
+    assert place and place[0][1] == "1000:1000" and place[0][2][0] == "GPU-2" and place[0][3] > 80 * GiB
+    c.tick(165)
+    assert c.assigned[SPOT] == "GPU-2" and SPOT not in c.limited
+    c.write_status(tmp_path / "status.json", 165)
+    sessions = json.loads((tmp_path / "status.json").read_text())["spot_sessions"]
+    assert sessions[SPOT[:12]]["state"] == "idle"
+
+
+def test_a_spot_left_at_1mib_before_any_saved_state_is_found_from_its_env_file(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 80, OWNER)]}  # GPU-0 (the env's GPU) is busy with its owner
+    gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
+    owner = OwnerContainer(OWNER, 0, ("GPU-0",))
+    spot = SpotContainer(SPOT, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0", user="1000:1000")
+    cfg = Config(controller=ControllerConfig(state_dir=tmp_path),
+                 idle=IdleConfig(idle_minutes=1, owner_cpu_threshold=0), spot=SpotConfig(oom_grace_seconds=10))
+    ck = FakeCkpt()
+    ck.spot_env = "CUDA_VISIBLE_DEVICES=GPU-1\nLABGPU_SPOT_GPU=GPU-1\nCUDA_DEVICE_MEMORY_LIMIT_0=1m\n"
+    c = Controller(cfg, FakeGpus(gpus, procs), FakeSessions([owner], [spot]), checkpointer=ck,
+                   workers=Inline(), handler_check=lambda pid: True, pid_check=lambda pid, cid: True)
+    c.start()
+    c.tick(0)
+    assert c.assigned[SPOT] == "GPU-1" and SPOT in c.limited
+    for t in (61, 70):  # GPU-1 (unclaimed) becomes lendable
+        c.tick(t)
+    assert any(call[0] == "place_as" and call[2][0] == "GPU-1" for call in ck.calls)

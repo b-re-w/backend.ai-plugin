@@ -183,6 +183,17 @@ class CudaCheckpoint:
     def place(self, cid: str, pid: int, order: Sequence[str], size: int) -> None:
         place(cid, pid, order=order, size=size, run=self.run, identify=self.identify)
 
+    def read_spot_env(self, cid: str, user: str) -> str | None:
+        """The spot env file the monitor last wrote in the container, None if there is none."""
+        try:
+            return self.run(cid, "cat", SPOT_ENV_FILE, user=user)
+        except CheckpointError:
+            return None
+
+    def place_as(self, cid: str, user: str, order: Sequence[str], size: int) -> None:
+        """Like place() for a session with no process to read the user from (SPEC 2.12 rule 1-2)."""
+        place(cid, 0, order=order, size=size, run=self.run, user=user)
+
     def raise_oom(self, cid: str, pids: Sequence[int], order: Sequence[str], reason: str) -> None:
         raise_oom(cid, pids, order=order, reason=reason, run=self.run, identify=self.identify)
 
@@ -244,6 +255,12 @@ def spot_env(order: Sequence[str], limits: Sequence[int]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def parse_spot_env(text: str) -> tuple[str, bool]:
+    """(GPU the session was last placed on, whether its limit there is 1 MiB) from spot_env() text."""
+    values = dict(line.partition("=")[::2] for line in text.splitlines() if "=" in line)
+    return values.get("LABGPU_SPOT_GPU", ""), values.get("CUDA_DEVICE_MEMORY_LIMIT_0") == "1m"
+
+
 def _hami(
     run: Callable[..., str], cid: str, user: str, limits: Sequence[int], order: Sequence[str],
     pids: Sequence[int] = (), sig: int = 0, marker: str = "",
@@ -288,15 +305,17 @@ def place(
     size: int,
     run: Callable[..., str] | None = None,
     identify: Callable[[int], ProcIdentity] = identify,
+    user: str = "",
 ) -> None:
     """
     After a move or restore: cuda:0 (the GPU it now runs on, `order[0]`) gets `size` bytes and
     every other attached GPU, including the one handed back to its owner, 1 MiB (SPEC 2.12).
+    `user` ("uid:gid") instead of reading it from `pid`, for a session with no GPU process.
     """
     run = run or DockerExec()
     # Whole MiB: the env file says "<n>m", and HAMi-core compares it with the shared value.
     limits = [max(size // BLOCKED_BYTES * BLOCKED_BYTES, BLOCKED_BYTES)] + [BLOCKED_BYTES] * (len(order) - 1)
-    _hami(run, cid, identify(pid).user, limits, order)
+    _hami(run, cid, user or identify(pid).user, limits, order)
 
 
 def _exists(pid: int) -> bool:

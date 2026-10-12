@@ -18,6 +18,23 @@ class GpuTracker:
         self.mem_baseline = first.owner_memory if first.ok else 0
         self.prev_owners = first.owner_containers if first.ok else frozenset()
 
+    def snapshot(self, now: float) -> dict:
+        """What a restarted monitor needs to carry on (SPEC 2.10)."""
+        return {
+            "idle_for": max(now - self.last_active, 0.0),
+            "mem_baseline": self.mem_baseline,
+            "owners": sorted(self.prev_owners),
+        }
+
+    def resume(self, saved: dict, now: float) -> None:
+        """
+        Carry on from a saved snapshot: idle time continues from where it was (the time the
+        monitor was down never counts as idle), and owners that appeared meanwhile count as new.
+        """
+        self.last_active = now - max(float(saved.get("idle_for", 0.0)), 0.0)
+        self.mem_baseline = int(saved.get("mem_baseline", self.mem_baseline))
+        self.prev_owners = frozenset(str(c) for c in saved.get("owners", ()))
+
     def update(
         self,
         obs: GpuObservation,

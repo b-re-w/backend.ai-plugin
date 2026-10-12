@@ -22,14 +22,28 @@ from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
 from ..procmap import pid_in_container
-from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, device_minor, has_handler
+from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, device_minor, has_handler, parse_spot_env
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
 from .hostinfo import CpuSampler
 from .model import GpuObservation, GpuVerdict, ProcKind
 from .observer import observe
-from .placement import Action, Hold, Move, Oom, Park, ParkedSpot, Resize, Restore, RunningSpot, plan
+from .placement import (
+    Action,
+    Hold,
+    IdleSpot,
+    Move,
+    Oom,
+    Park,
+    ParkedSpot,
+    Rehome,
+    Resize,
+    Restore,
+    RunningSpot,
+    idle_stays,
+    plan,
+)
 
 log = logging.getLogger("ai.backend.labgpu.spot")
 
@@ -106,6 +120,11 @@ class Controller:
         self.gated: dict[str, str] = {}  # container -> the GPU its device files are opened for
         self.minors: dict[str, int | None] = {}  # GPU uuid -> /dev/nvidia<minor>
         self.caps: dict[str, int] = {}  # container -> memory limit last applied by the monitor, bytes
+        self.limited: set[str] = set()  # containers whose limits an out-of-memory error dropped to 1 MiB
+        self.waiting_since: dict[str, float] = {}  # idle spot sessions waiting for a GPU to be rehomed on
+        self._resume: dict | None = None  # saved judgement to carry on from at the first tick (SPEC 2.10)
+        self._inspected: set[str] = set()  # spot containers whose env file was read (or is being read)
+        self._found: dict[str, tuple[str, bool]] = {}  # container -> (GPU, limited) from its env file
         self._lock = threading.Lock()
         self._done: list[tuple[Action, bool, ParkedRecord | None]] = []
         self.checkpointer = checkpointer
@@ -114,6 +133,7 @@ class Controller:
         self.can_checkpoint = False
         self.workers = workers or ThreadPoolExecutor(max_workers=4, thread_name_prefix="spot-op")
         self._parked_path = cfg.controller.state_dir / "parked.json"
+        self._state_path = cfg.controller.state_dir / "monitor.json"
 
     # ---- setup ----
 
@@ -129,6 +149,49 @@ class Controller:
         if why:
             log.error("spot sessions cannot be moved or parked (%s); they only get the out-of-memory error", why)
         self._load_parked()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        try:
+            saved = json.loads(self._state_path.read_text())
+            self._resume = saved if isinstance(saved, dict) and float(saved.get("saved_at", 0)) > 0 else None
+        except (OSError, ValueError, TypeError):
+            self._resume = None
+
+    def _save_state(self, now: float) -> None:
+        """The judgement a restarted monitor carries on from (SPEC 2.10)."""
+        state = {
+            "saved_at": now,
+            "gpus": {u: t.snapshot(now) for u, t in self.trackers.items()},
+            "assigned": dict(self.assigned),
+            "caps": dict(self.caps),
+            "limited": sorted(self.limited),
+        }
+        try:
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            os.replace(tmp, self._state_path)
+        except OSError as e:
+            log.warning("cannot save the monitor state to %s: %s", self._state_path, e)
+
+    def _take_resume(self, now: float, live: set[str]) -> dict | None:
+        """The saved judgement if it is recent enough, applied to spot sessions still here; once."""
+        saved, self._resume = self._resume, None
+        if saved is None:
+            return None
+        age = now - float(saved.get("saved_at", 0))
+        if not 0 <= age <= self.cfg.controller.resume_max_age_seconds:
+            log.info("saved monitor state is %.0fs old; every GPU starts as just used", age)
+            return None
+        log.warning("resuming the monitor state saved %.0fs ago", age)
+        for cid, gpu in (saved.get("assigned") or {}).items():
+            if cid in live:
+                self.assigned[cid] = str(gpu)
+        for cid, cap in (saved.get("caps") or {}).items():
+            if cid in live:
+                self.caps[cid] = int(cap)
+        self.limited.update(c for c in saved.get("limited") or () if c in live)
+        return saved.get("gpus") or {}
 
     def _load_parked(self) -> None:
         try:
@@ -157,13 +220,19 @@ class Controller:
             log.error("docker unavailable, treating all GPUs as unknown: %s", e)
             owners, spots, docker_ok = [], [], False
         self.spot_info = {s.id: s for s in spots}
+        resumed = self._take_resume(now, set(self.spot_info)) if docker_ok else None
         for s in spots:
             self.first_seen.setdefault(s.id, now)
         for cid in [c for c in self.first_seen if c not in self.spot_info]:
             del self.first_seen[cid]
+        unknown = [s for s in spots if s.id not in self.assigned and s.id not in self._inspected]
         for s in spots:
             if s.gpu:
                 self.assigned.setdefault(s.id, s.gpu)
+        for s in unknown:
+            self._inspect(s)
+        self._inspected &= set(self.spot_info)
+        self._apply_found()
         for cid in [c for c in self.assigned if c not in self.spot_info]:
             del self.assigned[cid]
         for cid in [c for c in self.held if c not in self.spot_info]:
@@ -172,6 +241,9 @@ class Controller:
             del self.gated[cid]
         for cid in [c for c in self.caps if c not in self.spot_info]:
             del self.caps[cid]
+        self.limited &= set(self.spot_info)
+        for cid in [c for c in self.waiting_since if c not in self.spot_info]:
+            del self.waiting_since[cid]
         observations = self._observe(now, owners, spots, docker_ok)
         self.last_obs = {o.uuid: o for o in observations}
         busy_gpus = self._busy_gpus()
@@ -180,6 +252,8 @@ class Controller:
             tracker = self.trackers.get(obs.uuid)
             if tracker is None:
                 tracker = self.trackers[obs.uuid] = GpuTracker(obs, now)
+                if resumed and obs.uuid in resumed:
+                    tracker.resume(resumed[obs.uuid], now)
             verdicts[obs.uuid] = tracker.update(
                 obs,
                 now,
@@ -191,6 +265,7 @@ class Controller:
         self.last_verdicts = verdicts
         if docker_ok:
             self._place(now, spots)
+            self._save_state(now)
 
     def _busy_gpus(self) -> set[str]:
         return {
@@ -254,18 +329,59 @@ class Controller:
             for cid, gs in gpus_of.items()
         ]
 
-    def _idle(self) -> dict[str, list[str]]:
-        """Spot sessions with no GPU process yet, by the GPU they were given (SPEC 2.12 rule 1-1)."""
-        on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
-        out: dict[str, list[str]] = {}
-        for cid in sorted(self.spot_info):
-            gpu = self.assigned.get(cid)
-            if gpu and cid not in on_gpu and cid not in self.parked and cid not in self.held:
-                out.setdefault(gpu, []).append(cid)
-        return out
+    def _inspect(self, s: SpotContainer) -> None:
+        """
+        A spot session the monitor has no state for (new, or seen first after a restart without
+        saved state) may have been moved, or left at 1 MiB by an out-of-memory error, by an earlier
+        monitor; the env file that monitor wrote says so (SPEC 2.10, 2.12 rule 1-2).
+        """
+        self._inspected.add(s.id)
+        if not s.user or self.checkpointer is None:
+            return
+        ck = self.checkpointer
 
-    def _idle_shares(self) -> dict[str, float]:
-        return {g: sum(self._share(c) for c in cs) for g, cs in self._idle().items()}
+        def job() -> None:
+            try:
+                text = ck.read_spot_env(s.id, s.user)
+            except Exception:
+                log.exception("spot %s: reading its env file crashed", s.id[:12])
+                return
+            if text:
+                with self._lock:
+                    self._found[s.id] = parse_spot_env(text)
+
+        self.workers.submit(job)
+
+    def _apply_found(self) -> None:
+        with self._lock:
+            found, self._found = self._found, {}
+        for cid, (gpu, limited) in found.items():
+            info = self.spot_info.get(cid)
+            if info is None:
+                continue
+            if gpu and gpu in info.uuids:
+                self.assigned[cid] = gpu
+            if limited:
+                self.limited.add(cid)
+                log.warning("spot %s: its memory limit is 1 MiB from an earlier out-of-memory error", cid[:12])
+
+    def _idle_spots(self) -> list[IdleSpot]:
+        """Spot sessions with no GPU process yet (SPEC 2.12 rules 1-1, 1-2)."""
+        on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
+        return [
+            IdleSpot(cid, gpu, self.spot_info[cid].uuids, self._share(cid), cid in self.limited)
+            for cid in sorted(self.spot_info)
+            if (gpu := self.assigned.get(cid))
+            and cid not in on_gpu and cid not in self.parked and cid not in self.held
+        ]
+
+    def _idle(self) -> dict[str, list[str]]:
+        """Spot sessions with no GPU process that keep their share on the GPU they were given."""
+        out: dict[str, list[str]] = {}
+        for i in self._idle_spots():
+            if idle_stays(i, self.last_verdicts):
+                out.setdefault(i.assigned, []).append(i.container_id)
+        return out
 
     def _short(self, cid: str, gpu: str) -> bool:
         """Its limit is clearly below share x capacity (fragmented placement), so raise it when possible."""
@@ -314,8 +430,17 @@ class Controller:
             oom_grace=self.cfg.spot.oom_grace_seconds,
             oomed=self.oomed,
             busy=frozenset(self.busy),
-            idle=self._idle_shares(),
+            idle_spots=self._idle_spots(),
         )
+        # Idle sessions that cannot stay where they were and got no GPU this tick wait (rule 1-2).
+        rehomed = {a.container_id for a in actions if isinstance(a, Rehome)}
+        for i in self._idle_spots():
+            if idle_stays(i, self.last_verdicts) or i.container_id in rehomed:
+                self.waiting_since.pop(i.container_id, None)
+            else:
+                self.waiting_since.setdefault(i.container_id, now)
+        for cid in [c for c in self.waiting_since if c not in {i.container_id for i in self._idle_spots()}]:
+            del self.waiting_since[cid]
         for action in actions:
             self._dispatch(action, now)
         self._gate_new(spots)
@@ -459,6 +584,21 @@ class Controller:
                     self.caps[cid] = size
 
                 fallback = None
+            case Rehome(_, src, dst):
+                info = self.spot_info.get(cid)
+                user = info.user if info is not None else ""
+                size = self._cap(cid, dst)
+                if not user:
+                    log.error("spot %s: cannot rehome %s -> %s: session user unknown", cid[:12], src, dst)
+                    return
+                log.info("spot %s: rehome %s -> %s (no GPU process, %d MiB)", cid[:12], src, dst, size >> 20)
+
+                def job() -> None:
+                    ck.place_as(cid, user, self._order(visible, dst), size)
+                    self._gate(cid, allow=[dst], deny=[u for u in visible if u != dst])
+                    self.caps[cid] = size
+
+                fallback = None
             case Oom(_, gpu, reason):
                 # Per process (SPEC 2.12): one that installed the handler gets the error; one that
                 # did not is parked right away so it does not keep the owner's GPU.
@@ -502,7 +642,13 @@ class Controller:
     def _oom_job(self, cid: str, pids: tuple[int, ...], order: list[str], reason: str) -> Callable[[], None]:
         """torch.OutOfMemoryError in the program right away (SPEC 2.12). Nothing is ever killed."""
         ck = self.checkpointer
-        return lambda: ck.raise_oom(cid, pids, order, reason)
+
+        def job() -> None:
+            ck.raise_oom(cid, pids, order, reason)
+            with self._lock:
+                self.limited.add(cid)  # every limit is 1 MiB now, until it is placed again
+
+        return job
 
     def _submit(
         self,
@@ -552,11 +698,14 @@ class Controller:
                     replace(old, pids=tuple(dict.fromkeys(old.pids + record.pids))) if old else record
                 )
                 changed = True
-            elif isinstance(action, (Move, Restore)) and ok:
+            elif isinstance(action, (Move, Restore, Rehome)) and ok:
                 self.assigned[cid] = action.dst
                 self.gated[cid] = action.dst
+                self.limited.discard(cid)
+                self.waiting_since.pop(cid, None)
             elif isinstance(action, Gate) and ok:
                 self.gated[cid] = action.gpu
+
             if isinstance(action, Park) and ok:
                 self.gated[cid] = ""  # every device closed
             if isinstance(action, (Park, Oom)) and ok and record is not None:
@@ -633,6 +782,9 @@ class Controller:
             elif cid in on_gpu:
                 gpu = on_gpu[cid]
                 entry = {"state": "running", "gpu": gpu, "since": self.spot_seen.get((cid, gpu))}
+            elif cid in self.waiting_since:
+                # No GPU process, and the GPU it had can no longer host it: waits to be rehomed.
+                entry = {"state": "parked", "gpu": self.assigned.get(cid), "since": self.waiting_since[cid]}
             else:
                 entry = {"state": "idle", "gpu": self.assigned.get(cid), "since": None}
             out[cid[:12]] = entry

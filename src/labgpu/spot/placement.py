@@ -17,6 +17,9 @@ Rules:
 - Parked sessions get free GPUs before running sessions that must move.
 - A spot session with no GPU process yet still holds its share on the GPU it was given, within
   the room the running sessions leave (user decision), so no one else is placed there.
+- Such a session whose GPU can no longer host spots, or whose limit an out-of-memory error dropped
+  to 1 MiB, is given another GPU with room (`Rehome`, no checkpoint since nothing runs) after the
+  running and parked sessions are served; until then it holds no share anywhere.
 - Consolidation only when a session must move and its share fits nowhere (user decision): smaller
   spots on one GPU are moved elsewhere so that GPU has room; the waiting session moves next tick.
   Spread-out spots are otherwise left alone, since every move pauses a program for seconds.
@@ -49,6 +52,17 @@ class ParkedSpot:
     allowed: tuple[str, ...]
     since: float  # when it was parked
     share: float = 1.0
+
+
+@dataclass(frozen=True)
+class IdleSpot:
+    """A spot session with no GPU process (SPEC 2.12 rules 1-1, 1-2)."""
+
+    container_id: str
+    assigned: str  # the GPU it was given
+    allowed: tuple[str, ...]
+    share: float = 1.0
+    limited: bool = False  # an out-of-memory error dropped its memory limit to 1 MiB
 
 
 @dataclass(frozen=True)
@@ -97,7 +111,26 @@ class Resize:
     gpu: str
 
 
-Action = Move | Park | Restore | Oom | Hold | Resize
+@dataclass(frozen=True)
+class Rehome:
+    """Give a spot session with no GPU process a GPU it may use (SPEC 2.12 rule 1-2)."""
+
+    container_id: str
+    src: str
+    dst: str
+
+
+Action = Move | Park | Restore | Oom | Hold | Resize | Rehome
+
+
+def can_host(v: GpuVerdict | None) -> bool:
+    """Whether spot sessions may be (or stay) on this GPU."""
+    return v is not None and (v.state is GpuState.LENDABLE or (v.state is GpuState.LENT and not v.must_reclaim))
+
+
+def idle_stays(spot: IdleSpot, verdicts: Mapping[str, GpuVerdict]) -> bool:
+    """A spot session with no GPU process keeps the GPU it was given (else it is rehomed, rule 1-2)."""
+    return not spot.limited and can_host(verdicts.get(spot.assigned))
 
 
 def plan(
@@ -111,11 +144,12 @@ def plan(
     oomed: Mapping[str, float] | None = None,
     busy: frozenset[str] = frozenset(),
     idle: Mapping[str, float] | None = None,
+    idle_spots: Sequence[IdleSpot] = (),
 ) -> list[Action]:
     """
     `oomed`: when each container last got the out-of-memory error; `busy`: containers with an
     operation in flight, left alone this tick; `idle`: share held on each GPU by spot sessions
-    with no GPU process yet.
+    with no GPU process yet; `idle_spots`: those sessions themselves, which also get rehomed.
     """
     oomed = oomed or {}
     actions: list[Action] = []
@@ -133,7 +167,11 @@ def plan(
             else:
                 used[g] = used.get(g, 0.0) + s.share
     # Idle sessions come after running ones: they never push a running session off its GPU.
-    for g, share in (idle or {}).items():
+    idle_shares = dict(idle or {})
+    for i in idle_spots:
+        if idle_stays(i, verdicts):
+            idle_shares[i.assigned] = idle_shares.get(i.assigned, 0.0) + i.share
+    for g, share in idle_shares.items():
         used[g] = used.get(g, 0.0) + max(min(share, 1.0 - used.get(g, 0.0)), 0.0)
 
     def room(u: str) -> float:
@@ -159,8 +197,7 @@ def plan(
         return best.uuid
 
     def hosts(u: str) -> bool:
-        v = verdicts.get(u)
-        return v is not None and (v.state is GpuState.LENDABLE or (v.state is GpuState.LENT and not v.must_reclaim))
+        return can_host(verdicts.get(u))
 
     on_gpu: dict[str, list[RunningSpot]] = {}
     for r in running:
@@ -255,4 +292,12 @@ def plan(
             actions.append(Park(s.container_id, src, reason))  # still holding the GPU
         elif not parkable and now - last >= oom_grace:
             actions.append(Oom(s.container_id, src, reason))
+
+    # Sessions with no GPU process come last: they wait for room without holding the owner's GPU.
+    for i in sorted(idle_spots, key=lambda i: i.container_id):
+        if i.container_id in busy or idle_stays(i, verdicts):
+            continue
+        dst = target(i.assigned, i.allowed, i.share, may_return=i.limited)
+        if dst is not None:
+            actions.append(Rehome(i.container_id, i.assigned, dst))
     return actions
