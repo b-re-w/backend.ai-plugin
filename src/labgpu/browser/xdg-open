@@ -1,10 +1,9 @@
 #!/bin/sh
 # Mounted read-only into GPU sessions by the labgpu plugins (SPEC 1.14) and named in $BROWSER.
 # Programs in the session (gh, Claude Code, python -m webbrowser) call this to open a URL. There is
-# no browser in the container, so hand the URL to the newest VS Code window of the session through
-# its IPC socket ("code --openExternal"); the WebUI desktop app then opens it in the default
-# browser. tmux keeps a stale or missing VSCODE_IPC_HOOK_CLI, so the socket is looked up at call
-# time instead of trusted from the environment. Without a live VS Code window, print the URL.
+# no browser in the container, so the URL goes to a per-session file that the WebUI desktop app
+# polls through Backend.AI and opens in the user's default browser. Nothing here depends on a VS
+# Code window or on the terminal (tmux, ttyd) the program runs in.
 url="$1"
 case "$url" in
   http://*|https://*|mailto:*) ;;
@@ -14,24 +13,13 @@ case "$url" in
     ;;
 esac
 
-# VS Code helpers that forward --openExternal over the IPC socket: code serve-web, the VS Code
-# server of Remote Tunnels, and code-server.
-helpers=$(ls -t \
-  "$HOME"/.vscode/cli/serve-web/*/bin/helpers/browser.sh \
-  "$HOME"/.vscode-server/cli/servers/*/server/bin/helpers/browser.sh \
-  "$HOME"/.vscode-server/bin/*/bin/helpers/browser.sh \
-  /usr/local/lib/code-server-*/lib/vscode/bin/helpers/browser.sh \
-  2>/dev/null)
-sockets=$(ls -t "${XDG_RUNTIME_DIR:-/nonexistent}"/vscode-ipc-*.sock /tmp/vscode-ipc-*.sock 2>/dev/null)
-
-for sock in $sockets; do
-  [ -S "$sock" ] || continue
-  for helper in $helpers; do
-    # A dead socket (closed window) fails with ECONNREFUSED; try the next one.
-    if VSCODE_IPC_HOOK_CLI="$sock" "$helper" "$url" >/dev/null 2>&1; then
-      exit 0
-    fi
-  done
+for f in $(ls /home/work/.labgpu-browser/* 2>/dev/null | sort); do
+  if [ -w "$f" ]; then
+    # One line, "<nanoseconds> <url>": the app opens each new line once.
+    printf '%s %s\n' "$(date +%s%N)" "$url" > "$f"
+    echo "Opening in your browser through the Backend.AI desktop app: $url" >&2
+    exit 0
+  fi
 done
 
 echo "Open this URL in your browser: $url" >&2

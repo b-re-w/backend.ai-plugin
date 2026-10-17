@@ -48,7 +48,6 @@ from ai.backend.common.types import (
     DeviceModelInfo,
     DeviceName,
     MetricKey,
-    MountTypes,
     SlotName,
     SlotTypes,
 )
@@ -64,7 +63,8 @@ except ImportError:
     from ai.backend.agent.docker.resources import get_resource_spec_from_container
 
 from .. import __version__, devalloc, spotstatus
-from ..browser import browser_environ, browser_mounts
+from ..browser import browser_environ
+from ..browser.mounts import browser_mount_infos
 from ..fraction import build_hami_environ, compute_limits
 from ..paths import agent_state_dir, default_hook_path
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
@@ -385,12 +385,10 @@ class LabGpuPlugin(AbstractComputePlugin):
         return []
 
     async def generate_mounts(self, source_path: Path, device_alloc: Any) -> list[MountInfo]:
-        """The xdg-open that opens URLs through the session's VS Code (SPEC 1.14)."""
+        """The xdg-open that hands URLs to the WebUI desktop app (SPEC 1.14)."""
         if not self.enabled or not self._limits(device_alloc):
             return []
-        return [
-            MountInfo(MountTypes.BIND, m.source, m.target) for m in browser_mounts(self.key)
-        ]
+        return browser_mount_infos(self.key, source_path)
 
     # ---- metadata ----
 

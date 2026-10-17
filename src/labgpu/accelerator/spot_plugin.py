@@ -59,7 +59,8 @@ from ai.backend.common.types import (
 )
 
 from .. import __version__, devalloc, spotstatus
-from ..browser import browser_environ, browser_mounts
+from ..browser import browser_environ
+from ..browser.mounts import browser_mount_infos
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import HAMI_LOG_LEVEL, MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
@@ -380,13 +381,13 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         tool = self.cuda_checkpoint
         if not tool.is_file():
             log.warning("[%s] %s not found: this spot session cannot be moved", self.entry_name, tool)
-            return self._inject_mounts()
-        return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)), *self._inject_mounts()]
+            return self._inject_mounts(source_path)
+        return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)), *self._inject_mounts(source_path)]
 
-    def _inject_mounts(self) -> list[MountInfo]:
+    def _inject_mounts(self, source_path: Path) -> list[MountInfo]:
         return [
-            # SPEC 1.14: xdg-open through the session's VS Code.
-            *(MountInfo(MountTypes.BIND, m.source, m.target) for m in browser_mounts(self.key)),
+            # SPEC 1.14: xdg-open that hands URLs to the WebUI desktop app.
+            *browser_mount_infos(self.key, source_path),
             # sitecustomize.py: torch.OutOfMemoryError on the monitor's signal, GPU order after moves.
             MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR)),
             # The same GPU order for shells (and so nvidia-smi) started after a move.
