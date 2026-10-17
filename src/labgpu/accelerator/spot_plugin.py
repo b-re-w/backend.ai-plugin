@@ -59,6 +59,7 @@ from ai.backend.common.types import (
 )
 
 from .. import __version__, devalloc, spotstatus
+from ..browser import browser_environ, browser_mounts
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import HAMI_LOG_LEVEL, MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
@@ -319,6 +320,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             "PYTHONPATH": CONTAINER_PYTHON_DIR,
             "BASH_ENV": CONTAINER_PROFILE,
             "LABGPU_SPOT_OOM_SIGNAL": str(OOM_SIGNAL),
+            **browser_environ(self.key),
         }
         for i, uuid in enumerate(order):
             env[f"CUDA_DEVICE_MEMORY_LIMIT_{i}"] = (
@@ -378,9 +380,10 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             return self._inject_mounts()
         return [MountInfo(MountTypes.BIND, tool, Path(CONTAINER_CUDA_CHECKPOINT)), *self._inject_mounts()]
 
-    @staticmethod
-    def _inject_mounts() -> list[MountInfo]:
+    def _inject_mounts(self) -> list[MountInfo]:
         return [
+            # SPEC 1.14: xdg-open through the session's VS Code.
+            *(MountInfo(MountTypes.BIND, m.source, m.target) for m in browser_mounts(self.key)),
             # sitecustomize.py: torch.OutOfMemoryError on the monitor's signal, GPU order after moves.
             MountInfo(MountTypes.BIND, INJECT_DIR, Path(CONTAINER_PYTHON_DIR)),
             # The same GPU order for shells (and so nvidia-smi) started after a move.

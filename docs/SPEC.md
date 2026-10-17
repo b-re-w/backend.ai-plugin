@@ -219,6 +219,30 @@ WebUI 세션 세부 화면(5장)이 "내 GPU가 지금 스팟에 빌려 나가 �
   "빌려주지 않음"으로 보여 주지 않기 위해서입니다.
 - 세션이 받은 GPU는 컨테이너 환경변수 `LABGPU_DEVICE_UUIDS`로 알아냅니다(컨테이너별로 한 번만 조회해 기억).
 
+### 1.14 세션 안에서 링크를 사용자 브라우저로 열기 (`labgpu.browser`)
+
+세션 안 프로그램(`gh auth login`, Claude Code 로그인, `python -m webbrowser` 등)이 브라우저를 열려고 하면,
+컨테이너에는 브라우저가 없어 실패합니다. VS Code(serve-web, Remote Tunnels의 VS Code 서버, code-server)는
+자기 터미널에 `BROWSER`와 IPC 소켓(`VSCODE_IPC_HOOK_CLI`)을 넣어 주지만, tmux 서버는 처음 띄운 때의 환경을
+계속 써서 이 값이 없거나 이미 닫힌 창의 소켓을 가리킵니다(2026-10-12 확인). 그래서 플러그인이 대신 여는
+스크립트를 붙입니다(사용자 결정 2026-10-17).
+
+- **붙이는 것** (GPU를 받은 세션마다, 플러그인 키별로 따로):
+  - `/opt/labgpu/browser-<key>/xdg-open`: 읽기 전용 스크립트. 호출될 때마다 VS Code IPC 소켓
+    (`$XDG_RUNTIME_DIR`, `/tmp`의 `vscode-ipc-*.sock`)을 최신 순으로, VS Code 도우미 `browser.sh`
+    (`~/.vscode/cli/serve-web/*/bin/helpers/`, `~/.vscode-server/...`, code-server)와 짝지어 차례로 시도합니다.
+    닫힌 창의 소켓은 연결이 거부되어 다음 것으로 넘어갑니다. 성공하면 VS Code 화면이 `window.open`으로 주소를
+    열고, WebUI 데스크톱 앱이 "링크를 기본 브라우저로 열기" 설정(5장)에 따라 기본 브라우저로 보냅니다.
+  - 열린 VS Code 창이 없으면 주소를 출력하고 1로 끝납니다. `http`, `https`, `mailto` 외의 주소는 3으로 거부합니다.
+  - 환경변수 `BROWSER=/opt/labgpu/browser-<key>/xdg-open`: 컨테이너의 모든 프로세스(tmux 서버 포함)가 받습니다.
+  - `/etc/profile.d/labgpu-browser-<key>.sh`: `BROWSER`를 보지 않는 프로그램을 위해 로그인 셸의 PATH 맨 앞에
+    위 폴더를 넣습니다.
+- **키별 경로인 이유:** 한 세션이 여러 GPU 종류(예: `pro6000`과 `pro5000-72`)를 받으면 플러그인마다 마운트를
+  돌려줍니다. 같은 대상 경로를 두 번 마운트하면 컨테이너를 만들지 못하므로, 키마다 경로를 나눕니다.
+  `BROWSER`는 플러그인마다 다른 값이 들어와 하나만 남지만, 어느 것이든 같은 스크립트입니다.
+- **한계:** GPU를 받지 않은 세션에는 붙지 않습니다. VS Code 창이 여러 개면 가장 최근 소켓의 창에서 열립니다.
+  터미널 앱(ttyd)만 쓰고 VS Code를 열지 않았다면 자동으로 열 방법이 없습니다.
+
 ### 1.12 가짜 NVML 모드 (개발·시험 전용)
 
 환경변수 `LABGPU_FAKE_NVML=<json 파일>`이 있으면 NVML 대신 이 파일을 읽습니다(매 호출마다 다시 읽음).
@@ -688,6 +712,7 @@ OOM 오류로 한도를 1MiB로 낮춘 세션(`limited`).
 | agent 하나가 GPU 종류별 슬롯(`pro6000.shares`, `pro5000l.shares`, `a6000.shares`)을 보고하고, 매니저 `/config/resource-slots/details`(WebUI가 읽는 API)에 이름·단위와 함께 나옴 | 확인 (26.9, 가짜 NVML) |
 | 종류별 세션 생성: 각 세션이 맞는 GPU에 배정되고 CPU·RAM은 공용으로 집계됨, 꽉 찬 종류의 요청은 PENDING | 확인 (26.9, 가짜 NVML) |
 | 분할 할당 시 HAMi-core 환경변수가 맞게 들어감 (96GB의 0.5 → `49152m`, SM 50) | 확인 |
+| 1.14 xdg-open: tmux 안에서 `gh auth login`이 VS Code를 거쳐 데스크톱 앱의 기본 브라우저로 열림. 실제 serve-web 1.142의 `browser.sh`가 닫힌 소켓에 1을 돌려주는 것은 확인(2026-10-17, Primary) | UNVERIFIED (세션 안 동작은 미확인) |
 | `get_hooks`로 넘긴 `libvgpu.so`가 agent에 의해 마운트되고 `LD_PRELOAD`에 붙음 | 확인 (`/opt/kernel/libbaihook.so:/opt/kernel/libvgpu.so`) |
 | `block-compute-plugins`(모듈 경로)로 `cuda_frac`이 막히고, 설정 없는 `gpu_slot_4`는 건너뜀 | 확인 |
 | 같은 etcd 설정에서 해당 GPU가 없는 노드는 슬롯 용량 0 | 확인 (실제 RTX 4050 노드에서 PRO 슬롯 0) |

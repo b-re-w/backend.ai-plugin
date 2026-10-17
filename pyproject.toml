@@ -33,6 +33,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "labgpu.spot" = ["inject/*.py", "inject/*.sh"]
+"labgpu.browser" = ["xdg-open", "profile.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

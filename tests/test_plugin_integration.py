@@ -117,6 +117,19 @@ def test_one_and_a_half_gpus():
     assert len(limited) == 1
 
 
+def test_browser_opener_is_mounted_per_key(tmp_path):
+    """SPEC 1.14: a GPU session gets xdg-open and $BROWSER; a session without GPUs does not."""
+    p = make_plugin()
+    alloc = asyncio.run(p.create_alloc_map()).allocate({SlotName("cuda.shares"): Decimal("0.5")})
+    env = env_of(asyncio.run(p.generate_docker_args(None, alloc)))
+    assert env["BROWSER"] == "/opt/labgpu/browser-cuda/xdg-open"
+    mounts = {str(m.dst_path): m for m in asyncio.run(p.generate_mounts(tmp_path, alloc))}
+    assert set(mounts) == {"/opt/labgpu/browser-cuda", "/etc/profile.d/labgpu-browser-cuda.sh"}
+    shim = mounts["/opt/labgpu/browser-cuda"].src_path / "xdg-open"
+    assert shim.is_file() and shim.stat().st_mode & 0o111
+    assert asyncio.run(p.generate_mounts(tmp_path, {})) == []
+
+
 def test_discrete_mode_has_no_limits():
     p = make_plugin(allocation_mode="discrete")
     alloc_map = asyncio.run(p.create_alloc_map())
@@ -285,7 +298,14 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     tool = tmp_path / "cuda-checkpoint"
     tool.write_bytes(b"")
     spot.cuda_checkpoint = tool
-    tool_mount, py_mount, sh_mount = asyncio.run(spot.generate_mounts(tmp_path, alloc))
+    mounts = {str(m.dst_path): m for m in asyncio.run(spot.generate_mounts(tmp_path, alloc))}
+    tool_mount = mounts["/opt/labgpu/cuda-checkpoint"]
+    py_mount = mounts["/opt/labgpu/python"]
+    sh_mount = mounts["/etc/profile.d/labgpu-spot.sh"]
+    # SPEC 1.14: xdg-open through the session's VS Code, per plugin key.
+    assert (mounts["/opt/labgpu/browser-pro6000-spot"].src_path / "xdg-open").is_file()
+    assert mounts["/etc/profile.d/labgpu-browser-pro6000-spot.sh"].src_path.is_file()
+    assert env["BROWSER"] == "/opt/labgpu/browser-pro6000-spot/xdg-open"
     assert str(sh_mount.dst_path) == "/etc/profile.d/labgpu-spot.sh" and sh_mount.src_path.is_file()
     assert (tool_mount.src_path, str(tool_mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")
     assert str(py_mount.dst_path) == "/opt/labgpu/python"
