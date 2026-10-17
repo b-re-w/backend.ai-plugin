@@ -63,7 +63,7 @@ from ..browser import browser_environ, browser_mounts
 from ..nvml import FakeNvmlReader, GpuInfo, NvmlError, NvmlReader, open_reader
 from ..fraction import HAMI_LOG_LEVEL, MEMORY_SHARED_CACHE
 from ..paths import agent_state_dir, default_cuda_checkpoint, default_hook_path
-from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT, OOM_SIGNAL
+from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT, CONTAINER_STATE_FILE, OOM_SIGNAL, RESUME_SIGNAL
 from ..selection import GpuSelector, key_label, validate_key
 from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
@@ -320,6 +320,9 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             "PYTHONPATH": CONTAINER_PYTHON_DIR,
             "BASH_ENV": CONTAINER_PROFILE,
             "LABGPU_SPOT_OOM_SIGNAL": str(OOM_SIGNAL),
+            # SPEC 2.15: state file and resume signal for programs that wait for a GPU again.
+            "LABGPU_SPOT_STATE_FILE": CONTAINER_STATE_FILE,
+            "LABGPU_SPOT_RESUME_SIGNAL": str(RESUME_SIGNAL),
             **browser_environ(self.key),
         }
         for i, uuid in enumerate(order):

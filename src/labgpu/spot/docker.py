@@ -38,6 +38,7 @@ class SpotContainer:
     share: float = 1.0  # its share of one GPU (LABGPU_SPOT_SHARE, SPEC 2.12)
     cap: int = 0  # memory limit the plugin gave it at creation, bytes (LABGPU_SPOT_CAP, MiB); 0 unknown
     user: str = ""  # "uid:gid" of the session user (LOCAL_USER_ID / LOCAL_GROUP_ID), "" unknown
+    config_dir: str = ""  # host path mounted at /home/config, for the state file (SPEC 2.15)
 
 
 def parse_share(value: str | None) -> float:
@@ -105,7 +106,15 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         share=parse_share(env.get("LABGPU_SPOT_SHARE")),
         cap=int(env["LABGPU_SPOT_CAP"]) << 20 if env.get("LABGPU_SPOT_CAP", "").isdigit() else 0,
         user=_session_user(env),
+        config_dir=_config_dir(inspect),
     )
+
+
+def _config_dir(inspect: Mapping[str, Any]) -> str:
+    for m in inspect.get("Mounts") or []:
+        if m.get("Destination") == "/home/config":
+            return str(m.get("Source") or "")
+    return ""
 
 
 def _session_user(env: Mapping[str, str]) -> str:

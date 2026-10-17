@@ -22,7 +22,15 @@ from typing import Protocol
 
 from ..nvml import GpuInfo, GpuSnapshot, NvmlError
 from ..procmap import pid_in_container
-from .ckpt import OOM_SIGNAL, CheckpointError, CudaCheckpoint, device_minor, has_handler, parse_spot_env
+from .ckpt import (
+    OOM_SIGNAL,
+    STATE_FILE_NAME,
+    CheckpointError,
+    CudaCheckpoint,
+    device_minor,
+    has_handler,
+    parse_spot_env,
+)
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
@@ -122,6 +130,7 @@ class Controller:
         self.caps: dict[str, int] = {}  # container -> memory limit last applied by the monitor, bytes
         self.limited: set[str] = set()  # containers whose limits an out-of-memory error dropped to 1 MiB
         self.waiting_since: dict[str, float] = {}  # idle spot sessions waiting for a GPU to be rehomed on
+        self.published: dict[str, str] = {}  # container -> state last written to its state file (SPEC 2.15)
         self._resume: dict | None = None  # saved judgement to carry on from at the first tick (SPEC 2.10)
         self._inspected: set[str] = set()  # spot containers whose env file was read (or is being read)
         self._found: dict[str, tuple[str, bool]] = {}  # container -> (GPU, limited) from its env file
@@ -743,6 +752,8 @@ class Controller:
                    for c in idle.get(v.uuid, [])],
                 "spot_share": round(min(sum(self._share(c) for c in [*spots, *idle.get(v.uuid, [])]), 1.0), 4),
             })
+        sessions = self._spot_sessions()
+        self._publish(sessions, now)
         status = {
             "updated_at": now,
             "spot_enabled": self.cfg.spot.enabled,
@@ -757,11 +768,56 @@ class Controller:
                 for c, r in self.held.items()
             ],
             "busy": {c[:12]: op for c, op in self.busy.items()},
-            "spot_sessions": self._spot_sessions(),
+            "spot_sessions": sessions,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(status, indent=2))
         os.replace(tmp, path)
+
+    def _publish(self, sessions: Mapping[str, Mapping], now: float) -> None:
+        """
+        Each spot session's state to /home/config/labgpu-spot-state in its container, and the resume
+        signal when a reclaimed session can use a GPU again (SPEC 2.15).
+        """
+        for cid in [c for c in self.published if c not in self.spot_info]:
+            del self.published[cid]
+        for cid, info in self.spot_info.items():
+            entry = sessions.get(cid[:12])
+            if entry is None:
+                continue
+            prev, state = self.published.get(cid), str(entry["state"])
+            if state == prev:
+                continue
+            if info.config_dir and not self._write_state(Path(info.config_dir), entry, now):
+                continue  # retried on the next tick
+            self.published[cid] = state
+            if prev in RECLAIMED_STATES and state in USABLE_STATES and info.user:
+                self.workers.submit(self._resume_job(cid, info.user, prev, state))
+
+    @staticmethod
+    def _write_state(config_dir: Path, entry: Mapping, now: float) -> bool:
+        target = config_dir / STATE_FILE_NAME
+        tmp = config_dir / f".{STATE_FILE_NAME}.tmp"
+        body = {"state": entry["state"], "gpu": entry.get("gpu"), "since": entry.get("since"), "updated_at": now}
+        try:
+            tmp.write_text(json.dumps(body) + "\n")
+            os.replace(tmp, target)
+            return True
+        except OSError as e:
+            log.warning("cannot write the spot state file %s: %s", target, e)
+            return False
+
+    def _resume_job(self, cid: str, user: str, prev: str, state: str) -> Callable[[], None]:
+        ck = self.checkpointer
+
+        def job() -> None:
+            try:
+                ck.notify_resume(cid, user)
+                log.info("spot %s: %s -> %s, sent the resume signal", cid[:12], prev, state)
+            except (CheckpointError, OSError) as e:
+                log.warning("spot %s: resume signal failed: %s", cid[:12], e)
+
+        return job
 
     def _spot_sessions(self) -> dict[str, dict]:
         """What each known spot session is going through, for its user (SPEC 2.9.1, 2.14)."""
@@ -789,6 +845,11 @@ class Controller:
                 entry = {"state": "idle", "gpu": self.assigned.get(cid), "since": None}
             out[cid[:12]] = entry
         return out
+
+
+# SPEC 2.15: the resume signal goes out when a session moves from one of these to the other.
+RECLAIMED_STATES = frozenset({"parked", "held", "oom"})
+USABLE_STATES = frozenset({"idle", "running"})
 
 
 def _loop(controller: Controller, stop: threading.Event, clock: Callable[[], float]) -> None:

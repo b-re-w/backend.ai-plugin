@@ -225,6 +225,9 @@ class FakeCkpt:
     def raise_oom(self, cid, pids, order, reason):
         self.calls.append(("oom", tuple(pids), tuple(order)))
 
+    def notify_resume(self, cid, user):
+        self.calls.append(("resume", user))
+
 
 class Inline:
     def submit(self, fn):
@@ -234,10 +237,12 @@ class Inline:
         pass
 
 
-def make_controller(tmp_path: Path, procs, handler=True, gone=()):
+def make_controller(tmp_path: Path, procs, handler=True, gone=(), config_dir=""):
     gpus = [GpuInfo(i, f"GPU-{i}", P6K, 96 * GiB, f"0:{i}") for i in range(3)]
     owner = OwnerContainer("o" * 64, 0, ("GPU-0",))
-    spot = SpotContainer("s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0", user="1000:1000")
+    spot = SpotContainer(
+        "s" * 64, 0, ("GPU-0", "GPU-1", "GPU-2"), gpu="GPU-0", user="1000:1000", config_dir=str(config_dir)
+    )
     cfg = Config(
         controller=ControllerConfig(state_dir=tmp_path),
         idle=IdleConfig(idle_minutes=1, owner_cpu_threshold=0),
@@ -1013,6 +1018,40 @@ def test_spot_left_at_1mib_after_an_oom_error_gets_a_free_gpu_back(tmp_path):
     assert sessions[SPOT[:12]]["state"] == "idle"
 
 
+def test_state_file_and_resume_signal_follow_a_reclaimed_session(tmp_path):
+    """SPEC 2.15: the program saves and frees the GPU after the OOM error, then hears it may resume."""
+    OWNER, SPOT = "o" * 64, "s" * 64
+    conf = tmp_path / "config"
+    conf.mkdir()
+    state = conf / "labgpu-spot-state"
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    c, fake, ck = make_controller(tmp_path, procs, config_dir=conf)
+    for t in (0, 61, 70):
+        c.tick(t)
+    c.write_status(tmp_path / "status.json", 70)
+    assert json.loads(state.read_text())["state"] == "idle"  # written when first seen
+    procs[0].append((20, 30 * GiB, 90, SPOT))
+    c.tick(75)
+    c.write_status(tmp_path / "status.json", 75)
+    assert json.loads(state.read_text())["state"] == "running"
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)  # owner back, GPU-1/2 busy with strangers
+    c.tick(80)
+    procs[0].pop()  # the program saved and exited after the error
+    c.tick(85)
+    c.write_status(tmp_path / "status.json", 85)
+    assert json.loads(state.read_text())["state"] == "parked"
+    assert not [call for call in ck.calls if call[0] == "resume"]
+    procs[2] = []  # GPU-2 frees up
+    for t in (90, 160, 165):
+        c.tick(t)
+    c.write_status(tmp_path / "status.json", 165)
+    body = json.loads(state.read_text())
+    assert body["state"] == "idle" and body["gpu"] == "GPU-2" and body["updated_at"] == 165
+    assert [call for call in ck.calls if call[0] == "resume"] == [("resume", "1000:1000")]
+    c.write_status(tmp_path / "status.json", 170)  # no change: no second signal
+    assert len([call for call in ck.calls if call[0] == "resume"]) == 1
+
+
 def test_a_spot_left_at_1mib_before_any_saved_state_is_found_from_its_env_file(tmp_path):
     OWNER, SPOT = "o" * 64, "s" * 64
     procs = {0: [(10, 4 * GiB, 80, OWNER)]}  # GPU-0 (the env's GPU) is busy with its owner
@@ -1031,3 +1070,48 @@ def test_a_spot_left_at_1mib_before_any_saved_state_is_found_from_its_env_file(t
     for t in (61, 70):  # GPU-1 (unclaimed) becomes lendable
         c.tick(t)
     assert any(call[0] == "place_as" and call[2][0] == "GPU-1" for call in ck.calls)
+
+
+def test_spot_container_knows_its_config_dir():
+    from labgpu.spot.docker import parse_spot
+
+    inspect = {
+        "Id": "c" * 64,
+        "State": {"Pid": 1},
+        "Config": {"Env": ["LABGPU_SPOT=1", "LABGPU_SPOT_UUIDS=GPU-0"]},
+        "Mounts": [{"Source": "/scratch/k/config", "Destination": "/home/config"}],
+    }
+    assert parse_spot(inspect).config_dir == "/scratch/k/config"
+    assert parse_spot({**inspect, "Mounts": []}).config_dir == ""
+
+
+def test_resume_signal_reaches_only_processes_that_catch_it():
+    """SPEC 2.15: the in-container script signals a process only if SigCgt has the signal's bit."""
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from labgpu.spot.ckpt import RESUME_SIGNAL, _RESUME_PY
+
+    catcher = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import signal,sys,time\nsignal.signal({RESUME_SIGNAL}, lambda *a: sys.exit(7))\n"
+         "print('ready', flush=True)\ntime.sleep(30)"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    plain = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert catcher.stdout.readline().strip() == "ready"
+        subprocess.run(
+            [sys.executable, "-c", _RESUME_PY, str(RESUME_SIGNAL), str(catcher.pid), str(plain.pid)],
+            check=True,
+        )
+        assert catcher.wait(timeout=10) == 7
+        time.sleep(0.2)
+        assert plain.poll() is None  # no handler: left alone
+    finally:
+        for proc in (catcher, plain):
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGKILL)
+                proc.wait()

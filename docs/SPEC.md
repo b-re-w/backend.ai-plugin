@@ -655,6 +655,34 @@ OOM 오류로 한도를 1MiB로 낮춘 세션(`limited`).
 - 현황 파일이 없거나 오래됐으면, 또는 감시기가 그 세션을 아직 모르면 보고하지 않습니다(1.13과 같은 이유).
 - 스팟 세션의 GPU 사용량 통계는 지금처럼 주인 쪽 플러그인이 냅니다(1.9). 스팟 플러그인은 이 두 통계만 냅니다.
 
+### 2.15 세션 안 프로그램에 알리는 스팟 상태 파일과 재개 신호
+
+세션 안 프로그램이 "GPU가 회수되었다", "다시 GPU를 쓸 수 있다"를 직접 알 수 있게 합니다(사용자 결정 2026-10-17).
+2.14 통계는 Backend.AI API를 거쳐야 하고 갱신이 늦어서, 프로그램이 기다리기에는 맞지 않습니다.
+
+- **상태 파일:** 감시기가 스팟 세션마다 `/home/config/labgpu-spot-state`(컨테이너 안 경로, 환경변수
+  `LABGPU_SPOT_STATE_FILE`)에 지금 상태를 씁니다.
+  - 내용은 한 줄 JSON입니다: `{"state": "<상태>", "gpu": "<GPU UUID 또는 null>", "since": <유닉스 초 또는 null>,
+    "updated_at": <유닉스 초>}`. 상태 이름은 2.9.1 `spot_sessions`, 2.14와 같습니다(`running`, `idle`, `parked`,
+    `held`, `oom`).
+  - 상태가 바뀔 때마다, 그리고 감시기가 그 세션을 처음 볼 때 씁니다. 같은 폴더의 임시 파일에 쓴 뒤 이름을 바꿔
+    넣으므로 읽는 쪽이 반쯤 쓴 내용을 보지 않습니다. 이름을 바꿔 넣기 때문에 inotify는 파일이 아니라
+    `/home/config` 폴더를 지켜봐야 합니다(`IN_MOVED_TO`).
+  - 위치: agent가 커널마다 만들어 컨테이너에 읽기 전용으로 붙이는 설정 폴더(`/home/config`)입니다. 호스트 쪽 경로는
+    컨테이너의 마운트 정보(`docker inspect`)에서 찾습니다. 감시기는 agent 안에서 agent 계정으로 돌고 이 폴더도
+    agent가 만든 것이라 쓸 수 있고, 세션 사용자는 읽기만 할 수 있습니다.
+  - 마운트 정보에 `/home/config`가 없으면 쓰지 않습니다. 쓰기에 실패하면 WARNING을 남기고 다음 상태 변화 때 다시
+    씁니다.
+- **재개 신호:** 세션의 상태가 `parked`, `held`, `oom` 중 하나에서 `idle` 또는 `running`으로 바뀌면, 감시기가
+  컨테이너 안에서 세션 사용자로 재개 신호(`SIGRTMIN+11` = 45, 환경변수 `LABGPU_SPOT_RESUME_SIGNAL`)를 보냅니다.
+  - **그 신호에 처리기를 건 프로세스에만** 보냅니다(`/proc/<pid>/status`의 `SigCgt` 비트 44). 처리기가 없는
+    프로그램은 기본 동작으로 끝날 수 있기 때문입니다. 회수 신호(규칙 4, 신호 44)와 같은 방식입니다.
+  - `SIGUSR1/2`는 쓰지 않습니다(규칙 4와 같은 이유: HAMi-core가 SIGUSR1을 가져감).
+  - 쓰는 예: 회수 신호를 받아 체크포인트를 저장하고 GPU를 모두 놓은 프로그램은, 세션이 `parked`(빈 GPU를 기다림)가
+    됩니다. 감시기가 빈 GPU를 배정하면 `idle`이 되고, 이때 재개 신호를 받아 학습을 다시 시작합니다. 얼려 두었다가
+    되살린 프로그램(`parked` → `running`)은 원래 자리에서 그대로 이어지므로 따로 할 일이 없습니다.
+  - 보내기에 실패하면 WARNING만 남깁니다. 상태 파일이 기준이므로, 신호를 놓친 프로그램도 파일로 알 수 있습니다.
+
 ---
 
 ## 5. WebUI 세션 세부 화면 (사용자 포크 `backend.ai-webui`)
@@ -712,6 +740,7 @@ OOM 오류로 한도를 1MiB로 낮춘 세션(`limited`).
 | agent 하나가 GPU 종류별 슬롯(`pro6000.shares`, `pro5000l.shares`, `a6000.shares`)을 보고하고, 매니저 `/config/resource-slots/details`(WebUI가 읽는 API)에 이름·단위와 함께 나옴 | 확인 (26.9, 가짜 NVML) |
 | 종류별 세션 생성: 각 세션이 맞는 GPU에 배정되고 CPU·RAM은 공용으로 집계됨, 꽉 찬 종류의 요청은 PENDING | 확인 (26.9, 가짜 NVML) |
 | 분할 할당 시 HAMi-core 환경변수가 맞게 들어감 (96GB의 0.5 → `49152m`, SM 50) | 확인 |
+| 2.15 스팟 상태 파일 쓰기와 재개 신호(실제 스팟 세션 안에서 inotify로 받기, 처리기를 건 프로세스만 신호 받기) | UNVERIFIED (단위 테스트만) |
 | 1.14 xdg-open: tmux 안에서 `gh auth login`이 VS Code를 거쳐 데스크톱 앱의 기본 브라우저로 열림. 실제 serve-web 1.142의 `browser.sh`가 닫힌 소켓에 1을 돌려주는 것은 확인(2026-10-17, Primary) | UNVERIFIED (세션 안 동작은 미확인) |
 | `get_hooks`로 넘긴 `libvgpu.so`가 agent에 의해 마운트되고 `LD_PRELOAD`에 붙음 | 확인 (`/opt/kernel/libbaihook.so:/opt/kernel/libvgpu.so`) |
 | `block-compute-plugins`(모듈 경로)로 `cuda_frac`이 막히고, 설정 없는 `gpu_slot_4`는 건너뜀 | 확인 |

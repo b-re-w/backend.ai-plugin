@@ -197,6 +197,9 @@ class CudaCheckpoint:
     def raise_oom(self, cid: str, pids: Sequence[int], order: Sequence[str], reason: str) -> None:
         raise_oom(cid, pids, order=order, reason=reason, run=self.run, identify=self.identify)
 
+    def notify_resume(self, cid: str, user: str) -> None:
+        notify_resume(cid, user, run=self.run)
+
     @staticmethod
     def _try(fn: Callable[[], None]) -> None:
         try:
@@ -209,6 +212,10 @@ class CudaCheckpoint:
 # SIGUSR1/2: HAMi-core takes SIGUSR1 when CUDA initialises and replaces Python's handler.
 OOM_SIGNAL = 44  # SIGRTMIN + 10 with glibc; passed to the container as LABGPU_SPOT_OOM_SIGNAL
 BLOCKED_BYTES = 1 << 20
+# SPEC 2.15: sent when a reclaimed session can use a GPU again, only to processes that catch it.
+RESUME_SIGNAL = 45  # SIGRTMIN + 11; passed to the container as LABGPU_SPOT_RESUME_SIGNAL
+STATE_FILE_NAME = "labgpu-spot-state"  # in the kernel config dir, /home/config inside
+CONTAINER_STATE_FILE = f"/home/config/{STATE_FILE_NAME}"
 
 SPOT_ENV_FILE = "/tmp/labgpu-spot-env"  # read by the injected sitecustomize in new programs
 
@@ -316,6 +323,31 @@ def place(
     # Whole MiB: the env file says "<n>m", and HAMi-core compares it with the shared value.
     limits = [max(size // BLOCKED_BYTES * BLOCKED_BYTES, BLOCKED_BYTES)] + [BLOCKED_BYTES] * (len(order) - 1)
     _hami(run, cid, user or identify(pid).user, limits, order)
+
+
+# Runs inside the container as the session user: signal every process that catches the resume
+# signal (SigCgt bit signum-1); one without a handler would die of the default action.
+_RESUME_PY = """
+import os, sys
+sig = int(sys.argv[1])
+only = {int(x) for x in sys.argv[2:]}  # tests limit it to their own processes
+for name in os.listdir("/proc"):
+    if not name.isdigit() or int(name) == os.getpid() or (only and int(name) not in only):
+        continue
+    try:
+        with open("/proc/%s/status" % name) as f:
+            caught = next((l.split()[1] for l in f if l.startswith("SigCgt:")), "0")
+        if int(caught, 16) >> (sig - 1) & 1:
+            os.kill(int(name), sig)
+    except (OSError, ValueError):
+        pass
+"""
+
+
+def notify_resume(cid: str, user: str, *, run: Callable[..., str] | None = None) -> None:
+    """The resume signal to the session's processes that catch it (SPEC 2.15). Never kills."""
+    run = run or DockerExec()
+    run(cid, "sh", "-c", _SH, "sh", "", _RESUME_PY, str(RESUME_SIGNAL), user=user)
 
 
 def _exists(pid: int) -> bool:
