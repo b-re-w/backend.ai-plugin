@@ -17,15 +17,15 @@ log = logging.getLogger("ai.backend.labgpu.browser")
 
 def browser_mount_infos(key: str, config_dir: Path) -> list[MountInfo]:
     """
-    The opener, its profile script and the request file. Without the request file (cannot create
-    it) only the opener is mounted, which then prints the URL instead.
+    The opener and its profile script, after creating the request file in the session's
+    /home/work. Without the request file (cannot create it) the opener prints the URL instead.
     """
-    mounts = browser_mounts(key, config_dir)
+    f = request_file(config_dir, key)
     try:
-        f = request_file(config_dir)
+        f.parent.mkdir(mode=0o777, exist_ok=True)
+        f.parent.chmod(0o777)  # the session user may run as another uid than the agent
         f.touch(exist_ok=True)
-        f.chmod(0o666)  # the session user writes it, whatever uid the container runs as
+        f.chmod(0o666)
     except OSError as e:
         log.warning("[%s] cannot create %s: URLs from this session are only printed: %s", key, f, e)
-        mounts = [m for m in mounts if m.source != f]
-    return [MountInfo(MountTypes.BIND, m.source, m.target) for m in mounts]
+    return [MountInfo(MountTypes.BIND, m.source, m.target) for m in browser_mounts(key)]

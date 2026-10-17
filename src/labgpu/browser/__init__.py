@@ -15,7 +15,7 @@ CONTAINER_DIR_PREFIX = "/opt/labgpu/browser-"
 CONTAINER_PROFILE_PREFIX = "/etc/profile.d/labgpu-browser-"
 # The desktop app reads the first of these (by key) with Backend.AI's download_single.
 CONTAINER_REQUEST_DIR = "/home/work/.labgpu-browser"
-REQUEST_FILE_NAME = "browser-open-url"  # in the plugin's per-kernel config dir on the host
+REQUEST_DIR_NAME = ".labgpu-browser"
 
 
 @dataclass(frozen=True)
@@ -24,17 +24,20 @@ class BrowserMount:
     target: Path
 
 
-def request_file(config_dir: Path) -> Path:
-    """Host file the session writes URLs to; the plugin creates it in its per-kernel config dir."""
-    return config_dir / REQUEST_FILE_NAME
+def request_file(config_dir: Path, key: str) -> Path:
+    """
+    Host path of the file the session writes URLs to: a plain file in the kernel's scratch work dir
+    (/home/work inside), next to the config dir the agent hands to generate_mounts
+    (<scratch>/config/<key>). Not a bind mount: the agent mounts plugin files read-only.
+    """
+    return config_dir.parent.parent / "work" / REQUEST_DIR_NAME / key
 
 
-def browser_mounts(key: str, config_dir: Path) -> list[BrowserMount]:
+def browser_mounts(key: str) -> list[BrowserMount]:
     """Per plugin key, so a session holding several keys never mounts one target twice."""
     return [
         BrowserMount(BROWSER_DIR, Path(f"{CONTAINER_DIR_PREFIX}{key}")),
         BrowserMount(BROWSER_DIR / "profile.sh", Path(f"{CONTAINER_PROFILE_PREFIX}{key}.sh")),
-        BrowserMount(request_file(config_dir), Path(f"{CONTAINER_REQUEST_DIR}/{key}")),
     ]
 
 

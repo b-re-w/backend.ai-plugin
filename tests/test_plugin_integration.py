@@ -123,14 +123,12 @@ def test_browser_opener_is_mounted_per_key(tmp_path):
     alloc = asyncio.run(p.create_alloc_map()).allocate({SlotName("cuda.shares"): Decimal("0.5")})
     env = env_of(asyncio.run(p.generate_docker_args(None, alloc)))
     assert env["BROWSER"] == "/opt/labgpu/browser-cuda/xdg-open"
-    mounts = {str(m.dst_path): m for m in asyncio.run(p.generate_mounts(tmp_path, alloc))}
-    assert set(mounts) == {
-        "/opt/labgpu/browser-cuda",
-        "/etc/profile.d/labgpu-browser-cuda.sh",
-        "/home/work/.labgpu-browser/cuda",
-    }
-    request = mounts["/home/work/.labgpu-browser/cuda"].src_path
-    assert request == tmp_path / "browser-open-url" and request.stat().st_mode & 0o666 == 0o666
+    (tmp_path / "work").mkdir()  # the kernel scratch: <scratch>/config/<key>, <scratch>/work
+    conf = tmp_path / "config" / "cuda"
+    mounts = {str(m.dst_path): m for m in asyncio.run(p.generate_mounts(conf, alloc))}
+    assert set(mounts) == {"/opt/labgpu/browser-cuda", "/etc/profile.d/labgpu-browser-cuda.sh"}
+    request = tmp_path / "work" / ".labgpu-browser" / "cuda"  # /home/work/.labgpu-browser/cuda
+    assert request.is_file() and request.stat().st_mode & 0o777 == 0o666
     shim = mounts["/opt/labgpu/browser-cuda"].src_path / "xdg-open"
     assert shim.is_file() and shim.stat().st_mode & 0o111
     assert asyncio.run(p.generate_mounts(tmp_path, {})) == []
@@ -304,14 +302,18 @@ def test_spot_plugin_capacity_follows_the_monitor(fake_primary, tmp_path):
     tool = tmp_path / "cuda-checkpoint"
     tool.write_bytes(b"")
     spot.cuda_checkpoint = tool
-    mounts = {str(m.dst_path): m for m in asyncio.run(spot.generate_mounts(tmp_path, alloc))}
+    (tmp_path / "work").mkdir()
+    mounts = {
+        str(m.dst_path): m
+        for m in asyncio.run(spot.generate_mounts(tmp_path / "config" / "pro6000-spot", alloc))
+    }
+    assert (tmp_path / "work" / ".labgpu-browser" / "pro6000-spot").is_file()
     tool_mount = mounts["/opt/labgpu/cuda-checkpoint"]
     py_mount = mounts["/opt/labgpu/python"]
     sh_mount = mounts["/etc/profile.d/labgpu-spot.sh"]
     # SPEC 1.14: xdg-open through the session's VS Code, per plugin key.
     assert (mounts["/opt/labgpu/browser-pro6000-spot"].src_path / "xdg-open").is_file()
     assert mounts["/etc/profile.d/labgpu-browser-pro6000-spot.sh"].src_path.is_file()
-    assert mounts["/home/work/.labgpu-browser/pro6000-spot"].src_path == tmp_path / "browser-open-url"
     assert env["BROWSER"] == "/opt/labgpu/browser-pro6000-spot/xdg-open"
     assert str(sh_mount.dst_path) == "/etc/profile.d/labgpu-spot.sh" and sh_mount.src_path.is_file()
     assert (tool_mount.src_path, str(tool_mount.dst_path)) == (tool, "/opt/labgpu/cuda-checkpoint")

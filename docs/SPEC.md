@@ -230,8 +230,11 @@ VS Code 화면의 IPC 소켓을 빌렸으나, 그 화면이 열려 있을 때만
   - `/opt/labgpu/browser-<key>/xdg-open`: 읽기 전용 스크립트. `http`, `https`, `mailto` 주소를
     `/home/work/.labgpu-browser/` 아래 첫 번째(이름순) 쓰기 가능한 파일에 한 줄(`<나노초> <주소>`)로 덮어쓰고 0으로
     끝납니다. 파일이 없으면 주소를 출력하고 1, 그 밖의 주소는 3으로 거부합니다.
-  - `/home/work/.labgpu-browser/<key>`: 요청 파일. 플러그인이 커널별 설정 폴더(`generate_mounts`의
-    `source_path`)에 `browser-open-url`을 만들어(권한 666) 읽기·쓰기로 붙입니다. 세션이 시작할 때부터 있으므로
+  - `/home/work/.labgpu-browser/<key>`: 요청 파일. 마운트가 아니라 커널의 scratch 작업 폴더에 플러그인이 직접
+    만드는 보통 파일입니다(호스트 `<scratch>/work/.labgpu-browser/<key>`, `generate_mounts`가 받는 설정 폴더
+    `<scratch>/config/<key>` 옆, 폴더 777·파일 666). agent는 플러그인 마운트를 모두 읽기 전용으로 붙여서
+    (`agent.py`의 `_mount`, 26.8.3), 파일을 마운트하면 세션이 쓸 수 없었습니다(2026-10-17 Secondary에서 확인).
+    agent가 scratch를 만든 뒤 `generate_mounts`를 부르므로 이때 폴더가 있습니다. 세션이 시작할 때부터 있으므로
     앱이 읽을 때 "파일 없음" 오류가 나지 않습니다(없는 파일을 읽으면 매니저와 agent가 매번 오류 기록을 남김).
   - 환경변수 `BROWSER=/opt/labgpu/browser-<key>/xdg-open`: 컨테이너의 모든 프로세스(tmux 서버 포함)가 받습니다.
   - `/etc/profile.d/labgpu-browser-<key>.sh`: `BROWSER`를 보지 않는 프로그램을 위해 로그인 셸의 PATH 맨 앞에

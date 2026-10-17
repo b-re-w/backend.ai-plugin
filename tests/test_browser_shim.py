@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from labgpu.browser import BROWSER_DIR, browser_environ, browser_mounts
+from labgpu.browser import BROWSER_DIR, browser_environ, browser_mounts, request_file
 
 SHIM_TEXT = (BROWSER_DIR / "xdg-open").read_text()
 
@@ -42,10 +42,15 @@ def test_refuses_non_web_urls(tmp_path):
     assert run_shim(tmp_path, "file:///etc/passwd").returncode == 3
 
 
-def test_mounts_and_environ_are_per_key(tmp_path):
-    assert [str(m.target) for m in browser_mounts("pro6000", tmp_path)] == [
+def test_mounts_and_environ_are_per_key():
+    assert [str(m.target) for m in browser_mounts("pro6000")] == [
         "/opt/labgpu/browser-pro6000",
         "/etc/profile.d/labgpu-browser-pro6000.sh",
-        "/home/work/.labgpu-browser/pro6000",
     ]
     assert browser_environ("pro6000") == {"BROWSER": "/opt/labgpu/browser-pro6000/xdg-open"}
+
+
+def test_request_file_is_in_the_scratch_work_dir():
+    assert request_file(Path("/s/k/config/cuda-a6000"), "cuda-a6000") == Path(
+        "/s/k/work/.labgpu-browser/cuda-a6000"
+    )
