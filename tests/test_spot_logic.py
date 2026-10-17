@@ -143,6 +143,38 @@ def test_resolve_and_classify():
     assert b.has_unknown and not b.owner_containers
 
 
+def test_owner_cpu_skips_a_gpu_the_owner_does_not_touch_while_working_on_another():
+    """SPEC 2.4: a two-GPU owner busy on GPU-a does not keep its untouched GPU-b busy by CPU."""
+    owners = [OwnerContainer(OWNER, 100, ("GPU-a", "GPU-b"))]
+    snaps = {
+        0: GpuSnapshot(GPUS[0], 10 * GiB, 60, (GpuProcess(10, 8 * GiB, 60),)),
+        1: GpuSnapshot(GPUS[1], 0, 0, ()),
+    }
+    a, b = observe(GPUS, snaps.__getitem__, owners, lambda pids: {10: OWNER}, {OWNER: 30.0})
+    assert a.owner_cpu_cores == 30.0
+    assert b.owner_cpu_cores == 0.0
+
+
+def test_owner_cpu_keeps_every_gpu_busy_without_any_gpu_process():
+    """Preparing data or between epochs: no GPU process anywhere, so CPU protects all its GPUs."""
+    owners = [OwnerContainer(OWNER, 100, ("GPU-a", "GPU-b"))]
+    snaps = {0: GpuSnapshot(GPUS[0], 0, 0, ()), 1: GpuSnapshot(GPUS[1], 0, 0, ())}
+    a, b = observe(GPUS, snaps.__getitem__, owners, lambda pids: {}, {OWNER: 30.0})
+    assert a.owner_cpu_cores == 30.0 and b.owner_cpu_cores == 30.0
+
+
+def test_owner_cpu_still_counts_on_a_gpu_with_an_idle_owner_process():
+    """A process holding memory on GPU-b, even at 0% SM, keeps the CPU rule there (owner first)."""
+    owners = [OwnerContainer(OWNER, 100, ("GPU-a", "GPU-b"))]
+    snaps = {
+        0: GpuSnapshot(GPUS[0], 10 * GiB, 60, (GpuProcess(10, 8 * GiB, 60),)),
+        1: GpuSnapshot(GPUS[1], GiB, 0, (GpuProcess(11, GiB, 0),)),
+    }
+    a, b = observe(GPUS, snaps.__getitem__, owners, lambda pids: {10: OWNER, 11: OWNER},
+                   {OWNER: 30.0})
+    assert b.owner_cpu_cores == 30.0
+
+
 def test_config_from_dict():
     cfg = Config.from_dict({"idle": {"idle_minutes": 5}})
     assert cfg.idle.idle_seconds == 300

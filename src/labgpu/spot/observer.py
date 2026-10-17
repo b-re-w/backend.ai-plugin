@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 
@@ -114,4 +116,41 @@ def observe(
                 spots=spots_by_id,
             )
         )
-    return observations
+    return _cpu_only_where_owner_works(observations, owners_by_gpu, owner_cpu)
+
+
+def _cpu_only_where_owner_works(
+    observations: list[GpuObservation],
+    owners_by_gpu: Mapping[str, Mapping[str, OwnerContainer]],
+    owner_cpu: Mapping[str, float | None],
+) -> list[GpuObservation]:
+    """
+    SPEC 2.4: CPU is measured per container but a container may hold several GPUs. An owner's CPU
+    keeps a GPU busy unless the owner has no process on that GPU while it has one on another of its
+    GPUs: then the CPU belongs to that work, and the untouched GPU can be judged by itself. An
+    owner with no GPU process anywhere (preparing data, between epochs) keeps all its GPUs busy.
+    """
+    gpus_with_owner_procs: dict[str, set[str]] = {}
+    for obs in observations:
+        for proc in obs.processes:
+            if proc.kind is ProcKind.OWNER and proc.container_id:
+                gpus_with_owner_procs.setdefault(proc.container_id, set()).add(obs.uuid)
+    out = []
+    for obs in observations:
+        if not obs.ok:
+            out.append(obs)
+            continue
+        counted = [
+            cid
+            for cid in owners_by_gpu.get(obs.uuid, {})
+            if obs.uuid in gpus_with_owner_procs.get(cid, set())
+            or not gpus_with_owner_procs.get(cid)
+        ]
+        measured = [v for v in (owner_cpu.get(cid) for cid in counted) if v is not None]
+        cores = sum(measured) if measured else None
+        if counted and not measured:
+            cores = None  # unmeasurable stays unmeasurable
+        elif not counted:
+            cores = 0.0 if owners_by_gpu.get(obs.uuid) else obs.owner_cpu_cores
+        out.append(replace(obs, owner_cpu_cores=cores))
+    return out
