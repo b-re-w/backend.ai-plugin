@@ -130,6 +130,7 @@ class Controller:
         self.caps: dict[str, int] = {}  # container -> memory limit last applied by the monitor, bytes
         self.limited: set[str] = set()  # containers whose limits an out-of-memory error dropped to 1 MiB
         self.waiting_since: dict[str, float] = {}  # idle spot sessions waiting for a GPU to be rehomed on
+        self.lost_gpu: set[str] = set()  # parked sessions whose record was pruned: no GPU until a Rehome
         self.published: dict[str, str] = {}  # container -> state last written to its state file (SPEC 2.15)
         self._resume: dict | None = None  # saved judgement to carry on from at the first tick (SPEC 2.10)
         self._inspected: set[str] = set()  # spot containers whose env file was read (or is being read)
@@ -253,6 +254,7 @@ class Controller:
         self.limited &= set(self.spot_info)
         for cid in [c for c in self.waiting_since if c not in self.spot_info]:
             del self.waiting_since[cid]
+        self.lost_gpu &= set(self.spot_info)
         observations = self._observe(now, owners, spots, docker_ok)
         self.last_obs = {o.uuid: o for o in observations}
         busy_gpus = self._busy_gpus()
@@ -472,6 +474,9 @@ class Controller:
                 else:
                     log.info("spot %s: every parked pid %s ended, forgetting the record", cid[:12], gone)
                     del records[cid]
+                    if records is self.parked:
+                        # It has no GPU any more; the GPU it was given may be the owner's by now.
+                        self.lost_gpu.add(cid)
         if changed:
             self._save_parked()
 
@@ -501,10 +506,13 @@ class Controller:
     def _gate_new(self, spots: list[SpotContainer]) -> None:
         """
         A spot container can open only the GPU it was given, from the first time it is seen; a
-        parked one (no GPU at all) none of them, so nothing new starts on the owner's GPU.
+        parked one (no GPU at all) none of them, so nothing new starts on the owner's GPU. A parked
+        session whose record was pruned (its process ended) and now waits to be rehomed has no GPU
+        either: its old `assigned` GPU may be the one the owner reclaimed, so every device stays
+        closed until a Rehome opens its destination.
         """
         for s in spots:
-            gpu = "" if s.id in self.parked else self.assigned.get(s.id)
+            gpu = "" if s.id in self.parked or s.id in self.lost_gpu else self.assigned.get(s.id)
             if gpu is None or self.gated.get(s.id) == gpu or s.id in self.busy:
                 continue
             allow = [gpu] if gpu else []
@@ -712,6 +720,7 @@ class Controller:
                 self.gated[cid] = action.dst
                 self.limited.discard(cid)
                 self.waiting_since.pop(cid, None)
+                self.lost_gpu.discard(cid)
             elif isinstance(action, Gate) and ok:
                 self.gated[cid] = action.gpu
 

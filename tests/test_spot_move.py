@@ -1115,3 +1115,41 @@ def test_resume_signal_reaches_only_processes_that_catch_it():
             if proc.poll() is None:
                 proc.send_signal(signal.SIGKILL)
                 proc.wait()
+
+
+def test_waiting_session_after_its_parked_pid_ended_keeps_every_device_closed(tmp_path):
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 0, OWNER)], 1: [(11, GiB, 50, None)], 2: [(12, GiB, 50, None)]}
+    gone: set[int] = set()
+    c, fake, ck = make_controller(tmp_path, procs, handler=False, gone=gone)
+    c.minors = {"GPU-0": 0, "GPU-1": 1, "GPU-2": 2}
+    for t in (0, 61, 70):
+        c.tick(t)
+    procs[0].append((20, 10 * GiB, 90, SPOT))
+    procs[0][0] = (10, 4 * GiB, 80, OWNER)
+    c.tick(80)
+    procs[0].pop()
+    c.tick(85)
+    assert SPOT in c.parked
+    # Its only parked pid ends while no GPU has room: the record goes, the session waits.
+    gone.add(20)
+    procs[1] = [(11, 60 * GiB, 50, None)]
+    procs[2] = [(12, 60 * GiB, 50, None)]
+    ck.calls.clear()
+    c.tick(86)
+    assert SPOT not in c.parked and SPOT in c.waiting_since
+    assert all(not x[1] for x in ck.calls if x[0] == "gate")  # the old GPU-0 is not reopened
+    assert c.gated[SPOT] == ""
+    for t in (87, 88, 100):
+        c.tick(t)
+    assert all(not x[1] for x in ck.calls if x[0] == "gate")  # nothing ever opened
+    # A GPU frees up: only the Rehome destination opens.
+    procs[2] = []
+    ck.calls.clear()
+    for t in (110, 180):
+        c.tick(t)
+    gates = [x for x in ck.calls if x[0] == "gate"]
+    assert ("gate", (2,), (0, 1)) in gates
+    c.tick(185)  # the Rehome result is collected
+    assert SPOT not in c.waiting_since and c.gated[SPOT] == "GPU-2" and c.assigned[SPOT] == "GPU-2"
+    assert [x for x in ck.calls if x[0] == "gate"] == [("gate", (2,), (0, 1))]  # nothing else opened
