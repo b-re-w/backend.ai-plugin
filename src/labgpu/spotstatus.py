@@ -192,6 +192,37 @@ def spot_capacity(own_uuids: Collection[str], status: Mapping[str, GpuLending] |
     return sum(1 for u in own_uuids if u in status and status[u].state in SPOT_STATES)
 
 
+def pool_slots(own_uuids: Collection[str], status: Mapping[str, GpuLending] | None, slots: int) -> int:
+    """
+    Spot slot capacity with the shared pool on (SPEC 2.16.5): `slots` while the monitor is alive
+    and reports at least one GPU of this model with spot turned on, whatever state the GPUs are in
+    (a session may be created while every GPU is the owners'; it only waits when it uses the GPU).
+    A stale or missing status file, spot off, or no GPU of this model here means none (fail safe).
+    """
+    if status is None:
+        return 0
+    return slots if any(u in status and status[u].state for u in own_uuids) else 0
+
+
+def pick_idle_gpu(
+    own_uuids: Iterable[str], status: Mapping[str, GpuLending] | None, share: float = 1.0
+) -> tuple[str, int, float] | None:
+    """
+    Pool mode (SPEC 2.16.4): the GPU a new spot session starts out on. No share is reserved there,
+    so it is only a starting point: the GPU that can host spots with the most room (running spot
+    shares only), ties to the larger spot capacity, so late starters meet as few others as
+    possible. Returns (uuid, spot capacity in bytes, share of that capacity to cap it at) or None
+    when no GPU can host spots now; the cap is the session's share, or the room left if less.
+    """
+    if status is None:
+        return None
+    rooms = _rooms(own_uuids, status, {})
+    if not rooms:
+        return None
+    u, left, capacity = max(rooms, key=lambda r: (r[1], r[2]))
+    return u, capacity, min(share, max(left, 0.0))
+
+
 def _rooms(
     own_uuids: Iterable[str], status: Mapping[str, GpuLending], taken: Mapping[str, float]
 ) -> list[tuple[str, float, int]]:

@@ -34,9 +34,10 @@ from .ckpt import (
 from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
-from .hostinfo import CpuSampler
+from .hostinfo import CpuSampler, node_size, read_meminfo_gib
 from .model import GpuObservation, GpuState, GpuVerdict, ProcKind
 from .observer import observe
+from .pool import Pool, memory_pressure, resolve
 from .placement import (
     Action,
     Hold,
@@ -49,6 +50,7 @@ from .placement import (
     Resize,
     Restore,
     RunningSpot,
+    can_host,
     idle_stays,
     plan,
 )
@@ -107,6 +109,8 @@ class Controller:
         workers: ThreadPoolExecutor | None = None,
         handler_check: Callable[[int], bool] | None = None,
         pid_check: Callable[[int, str], bool] | None = None,
+        node_info: Callable[[], tuple[int | None, float | None]] | None = None,
+        mem_available: Callable[[], float | None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.gpus = gpus
@@ -141,6 +145,14 @@ class Controller:
         self.handler_check = handler_check or (lambda pid: has_handler(pid, OOM_SIGNAL))
         self.pid_check = pid_check or pid_in_container
         self.can_checkpoint = False
+        # Shared spot pool (SPEC 2.16): None when off, which keeps the SPEC 2.12 behaviour.
+        self.pool: Pool | None = None
+        if cfg.pool.enabled:
+            self.pool, notes = resolve(cfg.pool, *(node_info or node_size)())
+            for level, text in notes:
+                getattr(log, level)("spot pool: %s", text)
+        self._mem_available = mem_available or (lambda: read_meminfo_gib("MemAvailable"))
+        self.mem_pressure = False
         self.workers = workers or ThreadPoolExecutor(max_workers=4, thread_name_prefix="spot-op")
         self._parked_path = cfg.controller.state_dir / "parked.json"
         self._state_path = cfg.controller.state_dir / "monitor.json"
@@ -442,7 +454,9 @@ class Controller:
             oomed=self.oomed,
             busy=frozenset(self.busy),
             idle_spots=self._idle_spots(),
+            idle_holds_share=self.pool is None,
         )
+        actions = self._hold_back_new_grants(actions)
         # Idle sessions that cannot stay where they were and got no GPU this tick wait (rule 1-2).
         rehomed = {a.container_id for a in actions if isinstance(a, Rehome)}
         for i in self._idle_spots():
@@ -455,6 +469,27 @@ class Controller:
         for action in actions:
             self._dispatch(action, now)
         self._gate_new(spots)
+
+    def _hold_back_new_grants(self, actions: list[Action]) -> list[Action]:
+        """
+        Pool mode, node memory below the floor: no new GPU is handed out (rehoming an idle session,
+        restoring a parked one). Nothing is stopped or cleaned up (SPEC 2.16.6, 2.16.4).
+        """
+        if self.pool is None:
+            return actions
+        pressure = memory_pressure(self.pool, self._mem_available())
+        if pressure != self.mem_pressure:
+            self.mem_pressure = pressure
+            if pressure:
+                log.warning(
+                    "spot pool: node MemAvailable is below %g GiB; no new GPU is granted to spot sessions "
+                    "(none is stopped)", self.pool.mem_floor_gib,
+                )
+            else:
+                log.info("spot pool: node memory is back above the floor; GPU grants resume")
+        if not pressure:
+            return actions
+        return [a for a in actions if not isinstance(a, (Rehome, Restore))]
 
     def _prune_parked(self) -> None:
         """Drop recorded processes that ended (or whose PID was reused) while parked (SPEC 2.12 rule 5-1)."""
@@ -518,6 +553,16 @@ class Controller:
                 # No GPU process, and its GPU is the owner's right now (or unknown). `lost_gpu` is
                 # in memory only, so after a monitor restart a session that lost its GPU looks new:
                 # open nothing until a Rehome, Restore, or Move places it, or the GPU is free.
+                gpu = ""
+            if (
+                self.pool is not None
+                and gpu
+                and s.id not in on_gpu
+                and s.id not in self.held
+                and not can_host(self.last_verdicts.get(gpu))
+            ):
+                # Pool mode creates sessions even when no GPU is lendable (SPEC 2.16.5): an idle
+                # one keeps every device closed until a Rehome opens a GPU that can host it.
                 gpu = ""
             if gpu is None or self.gated.get(s.id) == gpu or s.id in self.busy:
                 continue
@@ -770,7 +815,11 @@ class Controller:
                 "spots": [{"container": c[:12], "share": self._share(c), "seen": self.first_seen.get(c)} for c in spots]
                 + [{"container": c[:12], "share": self._share(c), "seen": self.first_seen.get(c), "idle": True}
                    for c in idle.get(v.uuid, [])],
-                "spot_share": round(min(sum(self._share(c) for c in [*spots, *idle.get(v.uuid, [])]), 1.0), 4),
+                # Pool mode: idle sessions hold no share (SPEC 2.16.4).
+                "spot_share": round(
+                    min(sum(self._share(c) for c in [*spots, *(idle.get(v.uuid, []) if self.pool is None else [])]), 1.0),
+                    4,
+                ),
             })
         sessions = self._spot_sessions()
         self._publish(sessions, now)
@@ -789,10 +838,28 @@ class Controller:
             ],
             "busy": {c[:12]: op for c, op in self.busy.items()},
             "spot_sessions": sessions,
+            "pool": self._pool_status(),
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(status, indent=2))
         os.replace(tmp, path)
+
+    def _pool_status(self) -> dict:
+        """Pool figures for the status file (SPEC 2.9.1, 2.16.5); `enabled: false` when the pool is off."""
+        if self.pool is None:
+            return {"enabled": False}
+        spots = list(self.spot_info.values())
+        return {
+            "enabled": True,
+            "cpu_cores": self.pool.cpu_cores,
+            "mem_gib": self.pool.mem_gib,
+            "max_sessions": self.pool.max_sessions,
+            "mem_floor_gib": self.pool.mem_floor_gib,
+            "mem_pressure": self.mem_pressure,
+            "sessions": len(spots),
+            "requested_cpu_cores": sum(s.cpus for s in spots),
+            "requested_mem_gib": round(sum(s.mem for s in spots) / (1 << 30), 2),
+        }
 
     def _publish(self, sessions: Mapping[str, Mapping], now: float) -> None:
         """

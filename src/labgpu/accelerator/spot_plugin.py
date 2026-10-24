@@ -68,6 +68,8 @@ from ..spot.ckpt import CONTAINER_CUDA_CHECKPOINT, CONTAINER_STATE_FILE, OOM_SIG
 from ..selection import GpuSelector, key_label, validate_key
 from ..sizes import MiB
 from ..spot.config import Config as SpotConfigFile
+from ..spot.hostinfo import node_size
+from ..spot.pool import Pool, resolve as resolve_pool
 from .plugin import (
     DEVICE_CAPABILITIES,
     AllocationStrategy,
@@ -116,6 +118,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
     cuda_checkpoint: Path = Path("cuda-checkpoint")
     _handed_out: list[tuple[str, float, float]] | None = None  # (GPU uuid, when, share) handed to new sessions
     _container_uuids: dict[str, list[str]] | None = None  # container -> its LABGPU_SPOT_UUIDS
+    pool: Pool | None = None  # shared spot pool (SPEC 2.16); None keeps the SPEC 2.12 behaviour
 
     @property
     def slot(self) -> SlotName:
@@ -163,6 +166,7 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             return
         if str(cfg.get("monitor_enabled", "true")).lower() not in ("0", "false", "no"):
             self._start_monitor(cfg.get("monitor") or {}, state_dir)
+        self.pool = self._read_pool(cfg.get("monitor") or {})
         spot_section = (cfg.get("monitor") or {}).get("spot") or {}
         self.cuda_checkpoint = (
             Path(spot_section["cuda_checkpoint"])
@@ -176,6 +180,23 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
             self.key,
             [g.uuid for g in self._gpus or []],
         )
+
+    def _read_pool(self, sections: Mapping[str, Any]) -> Pool | None:
+        """`monitor/pool/*` (SPEC 2.16.1). Set it the same on every gpu_spot_N of a node. Bad values: no pool."""
+        try:
+            pool_cfg = SpotConfigFile.from_dict({k: dict(v) for k, v in sections.items()}).pool
+        except (ValueError, TypeError) as e:
+            log.error("[%s] bad spot monitor settings (%s); the shared pool stays off", self.entry_name, e)
+            return None
+        pool, notes = resolve_pool(pool_cfg, *node_size()) if pool_cfg.enabled else (None, [])
+        for level, text in notes:
+            getattr(log, level)("[%s] spot pool: %s", self.entry_name, text)
+        if pool is not None:
+            log.warning(
+                "[%s] spot pool on: %d slots, GPU goes to the first spot session that uses it (SPEC 2.16)",
+                self.entry_name, pool.slots,
+            )
+        return pool
 
     def _start_monitor(self, sections: Mapping[str, Any], state_dir: Path) -> None:
         """
@@ -239,14 +260,19 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         status = await asyncio.to_thread(
             spotstatus.read_status, self.spot_status_path, time.time(), self.spot_status_max_age
         )
-        return {self.slot: Decimal(spotstatus.spot_capacity([g.uuid for g in gpus], status))}
+        uuids = [g.uuid for g in gpus]
+        if self.pool is not None:
+            # SPEC 2.16.5: sessions may outnumber GPUs; the GPU is first come, first served.
+            return {self.slot: Decimal(spotstatus.pool_slots(uuids, status, self.pool.slots))}
+        return {self.slot: Decimal(spotstatus.spot_capacity(uuids, status))}
 
     async def create_alloc_map(self) -> AbstractAllocMap:
         # The agent builds allocation maps once at start, so the pool is sized for every GPU of
         # the model; the manager is held back by the live capacity in available_slots().
         gpus = await self._list_gpus() if self.enabled else []
+        size = self.pool.slots if self.pool is not None else len(gpus)
         devices = (
-            {POOL_DEVICE_ID: DeviceSlotInfo(SlotTypes.COUNT, self.slot, Decimal(len(gpus)))}
+            {POOL_DEVICE_ID: DeviceSlotInfo(SlotTypes.COUNT, self.slot, Decimal(size))}
             if gpus
             else {}
         )
@@ -266,6 +292,8 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
 
     def _pick(self, share: float) -> tuple[str, int]:
         """The GPU for a new spot session with `share` and its memory cap in bytes (SPEC 2.12)."""
+        if self.pool is not None:
+            return self._pick_idle(share)
         now = time.time()
         handed = [h for h in (self._handed_out or []) if now - h[1] < RESERVE_SECONDS]
         status = spotstatus.read_status(self.spot_status_path, now, self.spot_status_max_age)
@@ -293,6 +321,22 @@ class LabGpuSpotPlugin(AbstractComputePlugin):
         handed.append((uuid, now, share))
         self._handed_out = handed
         return uuid, cap
+
+    def _pick_idle(self, share: float) -> tuple[str, int]:
+        """
+        Pool mode (SPEC 2.16.4): no share is reserved. The session starts on the GPU with the most
+        room as a starting point only; the monitor opens its device file only while that GPU can
+        host spots and moves an idle session to a roomier GPU when it fills up.
+        """
+        status = spotstatus.read_status(self.spot_status_path, time.time(), self.spot_status_max_age)
+        uuids = [g.uuid for g in self._gpus or []]
+        picked = spotstatus.pick_idle_gpu(uuids, status, share)
+        if picked is None:
+            # Every GPU is the owners' (or the status is unknown): created anyway, with a hard cap;
+            # the monitor keeps its devices closed until a GPU can host it.
+            return (uuids[0] if uuids else ""), 0
+        uuid, capacity, usable = picked
+        return uuid, int(capacity * usable)
 
     async def generate_docker_args(self, docker: Any, device_alloc: Any) -> Mapping[str, Any]:
         if not self.enabled or self._allocated(device_alloc) <= 0:

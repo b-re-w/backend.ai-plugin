@@ -354,3 +354,29 @@ def test_spot_plugin_reports_each_spot_sessions_state(fake_primary, tmp_path):
 
     status.write_text(json.dumps({"updated_at": now - 3600, "gpus": []}))  # stale: report nothing
     assert asyncio.run(spot.gather_container_measures(None, [s1])) == []
+
+
+def test_spot_plugin_pool_mode_allows_more_sessions_than_gpus(fake_primary, tmp_path):
+    import time
+
+    from labgpu.accelerator.spot_plugin import SpotSlotPlugin1
+
+    status = tmp_path / "status.json"
+    monitor = {"pool": {"enabled": "true", "cpu_cores": "1", "mem_gib": "1", "overcommit_max_sessions": "6"}}
+    spot = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
+                       spot_status_path=str(status), monitor_enabled="false", monitor=monitor)
+    slot = SlotName("pro6000-spot.shares")
+    assert spot.pool is not None
+    assert asyncio.run(spot.available_slots()) == {slot: Decimal(0)}  # no status: none (fail safe)
+    status.write_text(json.dumps({"updated_at": time.time(), "gpus": [  # both GPUs are the owners'
+        {"uuid": "GPU-p6000-1", "state": "BUSY"}, {"uuid": "GPU-p6000-2", "state": "BUSY"},
+    ]}))
+    assert asyncio.run(spot.available_slots()) == {slot: Decimal(6)}  # not 0 and not the GPU count
+    amap = asyncio.run(spot.create_alloc_map())
+    allocs = [amap.allocate({slot: Decimal("1")}) for _ in range(6)]  # six sessions on two GPUs
+    env = env_of(asyncio.run(spot.generate_docker_args(None, allocs[0])))
+    assert env["CUDA_DEVICE_MEMORY_LIMIT_0"] == "1m"  # nothing can host it now: hard cap, no reservation
+    # Off by default: the same plugin without the pool reports the number of GPUs that can host spots.
+    plain = init_plugin(SpotSlotPlugin1, fake_primary, key="pro6000-spot", model_pattern="*PRO 6000*",
+                        spot_status_path=str(status), monitor_enabled="false")
+    assert plain.pool is None and asyncio.run(plain.available_slots()) == {slot: Decimal(0)}

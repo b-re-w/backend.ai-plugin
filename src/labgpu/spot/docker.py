@@ -39,6 +39,8 @@ class SpotContainer:
     cap: int = 0  # memory limit the plugin gave it at creation, bytes (LABGPU_SPOT_CAP, MiB); 0 unknown
     user: str = ""  # "uid:gid" of the session user (LOCAL_USER_ID / LOCAL_GROUP_ID), "" unknown
     config_dir: str = ""  # host path mounted at /home/config, for the state file (SPEC 2.15)
+    cpus: int = 0  # CPU cores it asked for (cpuset size), 0 unknown; for the pool figures (SPEC 2.16.5)
+    mem: int = 0  # memory limit it asked for, bytes, 0 none or unknown
 
 
 def parse_share(value: str | None) -> float:
@@ -107,7 +109,23 @@ def parse_spot(inspect: Mapping[str, Any]) -> SpotContainer:
         cap=int(env["LABGPU_SPOT_CAP"]) << 20 if env.get("LABGPU_SPOT_CAP", "").isdigit() else 0,
         user=_session_user(env),
         config_dir=_config_dir(inspect),
+        cpus=_cpuset_size((inspect.get("HostConfig") or {}).get("CpusetCpus")),
+        mem=int((inspect.get("HostConfig") or {}).get("Memory") or 0),
     )
+
+
+def _cpuset_size(cpuset: str | None) -> int:
+    """Cores in a cpuset list such as "0-3,8"; 0 when empty or malformed."""
+    total = 0
+    try:
+        for part in (cpuset or "").split(","):
+            if not part.strip():
+                continue
+            lo, _, hi = part.partition("-")
+            total += int(hi or lo) - int(lo) + 1
+    except ValueError:
+        return 0
+    return total
 
 
 def _config_dir(inspect: Mapping[str, Any]) -> str:

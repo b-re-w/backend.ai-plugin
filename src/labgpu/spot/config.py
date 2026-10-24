@@ -66,11 +66,31 @@ class SpotConfig:
 
 
 @dataclass(frozen=True)
+class PoolConfig:
+    """
+    Shared spot pool (SPEC 2.16). `enabled = false` (the default) keeps the behaviour of SPEC 2.12
+    exactly: idle spot sessions hold GPU shares and the slot capacity is the number of GPUs.
+    With it on, an idle spot session holds no GPU share (the GPU goes to whichever spot session
+    starts using it first), spot slot capacity follows `overcommit_max_sessions`, and the pool
+    figures are published in the status file. The CPU and RAM sizes are nominal in this version:
+    nothing enforces them yet (SPEC 2.16.3).
+    """
+
+    enabled: bool = False
+    cpu_cores: int = 8
+    mem_gib: float = 32.0
+    preset_name: str = ""  # a Backend.AI resource preset lives in the manager; the plugin cannot read it
+    overcommit_max_sessions: int = 16  # 0: no limit
+    mem_floor_gib: float = 8.0
+
+
+@dataclass(frozen=True)
 class Config:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     reclaim: ReclaimConfig = field(default_factory=ReclaimConfig)
     spot: SpotConfig = field(default_factory=SpotConfig)
+    pool: PoolConfig = field(default_factory=PoolConfig)
 
     @classmethod
     def load(cls, path: Path | None) -> Self:
@@ -81,7 +101,7 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Self:
-        unknown = set(raw) - {"controller", "idle", "reclaim", "spot"}
+        unknown = set(raw) - {"controller", "idle", "reclaim", "spot", "pool"}
         if unknown:
             raise ValueError(f"unknown config sections: {sorted(unknown)}")
         return cls(
@@ -89,6 +109,7 @@ class Config:
             idle=_build(IdleConfig, raw.get("idle", {})),
             reclaim=_build(ReclaimConfig, raw.get("reclaim", {})),
             spot=_build(SpotConfig, raw.get("spot", {})),
+            pool=_build(PoolConfig, raw.get("pool", {})),
         )
 
 

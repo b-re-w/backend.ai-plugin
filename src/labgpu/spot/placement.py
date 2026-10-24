@@ -16,7 +16,11 @@ Rules:
   A parked session is restored when a GPU of its model frees up.
 - Parked sessions get free GPUs before running sessions that must move.
 - A spot session with no GPU process yet still holds its share on the GPU it was given, within
-  the room the running sessions leave (user decision), so no one else is placed there.
+  the room the running sessions leave (user decision), so no one else is placed there. With the
+  shared pool on (`idle_holds_share=False`, SPEC 2.16.4) it holds nothing: the GPU goes to the spot
+  session that starts using it first, and a late starter is handled as above (moved, errored,
+  or parked). An idle session whose GPU has no room is given another GPU with room, if any, so
+  it does not have to be moved once it starts. Nothing here ever stops or removes a session.
 - Such a session whose GPU can no longer host spots, or whose limit an out-of-memory error dropped
   to 1 MiB, is given another GPU with room (`Rehome`, no checkpoint since nothing runs) after the
   running and parked sessions are served; until then it holds no share anywhere.
@@ -145,11 +149,13 @@ def plan(
     busy: frozenset[str] = frozenset(),
     idle: Mapping[str, float] | None = None,
     idle_spots: Sequence[IdleSpot] = (),
+    idle_holds_share: bool = True,
 ) -> list[Action]:
     """
     `oomed`: when each container last got the out-of-memory error; `busy`: containers with an
     operation in flight, left alone this tick; `idle`: share held on each GPU by spot sessions
     with no GPU process yet; `idle_spots`: those sessions themselves, which also get rehomed.
+    `idle_holds_share=False` (shared pool, SPEC 2.16.4): idle sessions hold no share at all.
     """
     oomed = oomed or {}
     actions: list[Action] = []
@@ -167,8 +173,8 @@ def plan(
             else:
                 used[g] = used.get(g, 0.0) + s.share
     # Idle sessions come after running ones: they never push a running session off its GPU.
-    idle_shares = dict(idle or {})
-    for i in idle_spots:
+    idle_shares = dict(idle or {}) if idle_holds_share else {}
+    for i in idle_spots if idle_holds_share else ():
         if idle_stays(i, verdicts):
             idle_shares[i.assigned] = idle_shares.get(i.assigned, 0.0) + i.share
     for g, share in idle_shares.items():
@@ -177,7 +183,9 @@ def plan(
     def room(u: str) -> float:
         return 1.0 - used.get(u, 0.0)
 
-    def target(src: str, allowed: Sequence[str], share: float, *, may_return: bool = False) -> str | None:
+    def target(
+        src: str, allowed: Sequence[str], share: float, *, may_return: bool = False, hold: bool = True
+    ) -> str | None:
         """The fullest GPU of src's model with room for `share`; a parked spot may go back to src."""
         model = verdicts[src].model if src in verdicts else None
         candidates = [
@@ -193,7 +201,8 @@ def plan(
         if not candidates:
             return None
         best = min(candidates, key=lambda v: (room(v.uuid) - share, -(v.spot_capacity or v.lendable_memory)))
-        used[best.uuid] = used.get(best.uuid, 0.0) + share  # promised this tick
+        if hold:
+            used[best.uuid] = used.get(best.uuid, 0.0) + share  # promised this tick
         return best.uuid
 
     def hosts(u: str) -> bool:
@@ -295,9 +304,13 @@ def plan(
 
     # Sessions with no GPU process come last: they wait for room without holding the owner's GPU.
     for i in sorted(idle_spots, key=lambda i: i.container_id):
-        if i.container_id in busy or idle_stays(i, verdicts):
+        if i.container_id in busy:
             continue
-        dst = target(i.assigned, i.allowed, i.share, may_return=i.limited)
+        if idle_stays(i, verdicts) and (idle_holds_share or room(i.assigned) + eps >= i.share):
+            continue
+        # Pool mode, GPU without room: a better GPU if there is one; else it stays (it has to
+        # wait where it is, and is handled when it starts: moved, errored, or parked).
+        dst = target(i.assigned, i.allowed, i.share, may_return=i.limited, hold=idle_holds_share)
         if dst is not None:
             actions.append(Rehome(i.container_id, i.assigned, dst))
     return actions

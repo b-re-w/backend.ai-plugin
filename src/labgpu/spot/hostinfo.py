@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .. import procmap
+
+
+def parse_meminfo_gib(text: str, key: str) -> float | None:
+    """A /proc/meminfo figure (kB) in GiB, e.g. key "MemAvailable"; None when missing."""
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        if name == key:
+            try:
+                return int(rest.split()[0]) / (1024 * 1024)
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def read_meminfo_gib(key: str, path: Path = Path("/proc/meminfo")) -> float | None:
+    try:
+        return parse_meminfo_gib(path.read_text(), key)
+    except OSError:
+        return None
+
+
+def node_size() -> tuple[int | None, float | None]:
+    """(CPU cores, RAM in GiB) of this node, None where unreadable (SPEC 2.16.1)."""
+    return os.cpu_count(), read_meminfo_gib("MemTotal")
 
 
 def parse_cpu_usage_usec(text: str) -> int:
