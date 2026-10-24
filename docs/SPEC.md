@@ -718,9 +718,10 @@ OOM 오류로 한도를 1MiB로 낮춘 세션(`limited`).
 
 스팟 자원 정책입니다(사용자 결정 2026-10-24). **이 절이 2.12의 "빈 스팟도 GPU 몫을 셉니다"(규칙 1-1)를 대체합니다.**
 **구현 상태(2026-10-24 승인):** GPU 먼저 쓰는 쪽 우선(2.16.4), 정리하지 않음, 허용 세션 수와 슬롯 보고(2.16.5), 풀 설정 검증과 현황 필드,
-메모리 바닥은 구현했습니다. **CPU·RAM 런타임 공유(2.16.2: `CgroupParent`, `CpuShares`, `MemoryReservation`, `OomScoreAdj`)와
-코어 쪽 초과 배정(2.16.3)은 구현하지 않았습니다.** 이 버전에서 풀의 CPU·RAM 크기는 명목값이며 강제하지 않습니다. 코어 변경이 필요한
-부분은 4절 열린 질문에 있습니다. 풀 동작 전체는 노드마다 `pool.enabled`(기본 꺼짐)로 켜고, 꺼져 있으면 2.12 그대로입니다.
+메모리 바닥은 구현했습니다. **CPU·RAM 런타임 공유(2.16.2)와 코어 쪽 초과 배정(2.16.3)은 사용자 승인(2026-10-24)으로
+Backend.AI 포크(`bai/`, 브랜치 `develop`)에 코어 변경으로 구현했습니다(2.16.3의 "코어 변경" 소절). 기본 꺼짐이고 설정 키로 켭니다. 단위 테스트만
+통과했고 실기는 UNVERIFIED입니다.** 플러그인의 `pool.cpu_cores`, `pool.mem_gib`는 여전히 명목값이며 강제는 코어 쪽 `spot-overcommit-factor`와
+`spot.slice`(아래)가 합니다. 풀 동작 전체는 노드마다 `pool.enabled`(기본 꺼짐)로 켜고, 꺼져 있으면 2.12 그대로입니다.
 etcd 설정은 agent 시작 때 한 번 읽으므로(`config_watch_enabled = False`, 다른 감시기 키와 같음) 켜고 끄는 데 agent 재시작이 필요합니다.
 `monitor/pool/*`는 노드의 모든 `gpu_spot_N`에 같은 값으로 넣습니다(감시기는 처음 뜬 플러그인의 설정을 읽고, 각 플러그인은 자기 설정으로 슬롯을 보고).
 
@@ -780,7 +781,58 @@ mem_floor_gib = 8            # 노드 MemAvailable이 이 값 밑으로 떨어�
   보내지 않게 하기. 우회안으로 **노드에 agent를 하나 더 띄워(스팟 전용 agent)** 그 agent의 `[resource] reserved-cpu`,
   `reserved-mem`과 자원 그룹으로 풀을 만드는 방법이 있으나, 같은 노드의 자원을 두 agent가 따로 세므로 소유자 몫과의
   합 검증이 설정에만 맡겨지고, 초과 배정은 여전히 안 됩니다. 어느 쪽도 이 절에서 결정하지 않습니다.
-- 코어를 패치하지 않습니다. 사용자가 나중에 코어 수정을 승인하면 4절 항목을 그때 설계합니다.
+- 원래는 코어를 패치하지 않는 방침이었으나, 사용자가 2026-10-24에 코어 수정을 승인해 아래 "코어 변경"을 넣었습니다(AGENTS.md의 코어 불가 원칙에 대한 명시적 예외, 세션 공유 코어 변경과 같은 방식).
+
+##### 코어 변경 (포크 `bai/`, 커밋 `feat(lab): Serve spot sessions' cpu and mem from a shared overcommitted pool`)
+
+스팟 세션 = 요청 슬롯 중 이름이 `spot-slot-suffix`로 끝나고 양수인 것이 하나라도 있는 커널. 접미사가 비어 있으면(기본) 아무것도 바뀌지 않습니다.
+
+| 위치 | 동작 |
+|---|---|
+| 매니저 스케줄러 (`PlacementPlan.from_items/from_placement`, `ResourceRequirements.without_spot_pooled_slots`) | 스팟 커널의 `cpu`, `mem`을 `ResourceTrackerFilter`와 `AgentStateTracker`가 보는 요청에서 뺌. 노드에 빈 CPU·RAM이 없어도 배치됨. 키페어/프로젝트 쿼터와 WebUI 표시는 `requested`를 그대로 써서 변하지 않음 |
+| 매니저 DB (`_reserve_kernel_resources`, `_prereserve_kernel_resources`, `_allocate_kernel_resources`) | 스팟 커널은 `agent_resources`의 `cpu`, `mem`에 `reserved`/`prereserved`/`used`를 더하지 않음(행의 보유량 0, `requested` 유지). 해제 경로는 행의 보유량만 빼므로 0을 뺌 |
+| agent 장치 할당 (`resources.allocate`, `ComputerContext.spot_alloc_map`) | 스팟 커널의 cpu·mem은 노드 용량의 `spot-overcommit-factor`배인 별도 할당 맵에서 잡음. `resource_spec.allocations` 모양은 그대로(실제 요청량)라 occupied_slots, 통계, 복원 경로가 그대로 동작. 해제와 복원은 컨테이너 라벨 `ai.backend.spot=1`로 맞는 맵을 고름 |
+| agent 컨테이너 (`agent/spot.py`, `docker/agent.py`) | 스팟이면 `Cpus`, `CpusetCpus`, `Memory`, `MemorySwap` 제거, `CpuShares` = 코어 수 x 1024, `MemoryReservation` = 요청 mem, `OomScoreAdj` = 1000, `CgroupParent` = `spot-cgroup-parent`(비어 있으면 설정 안 함), 라벨 `ai.backend.spot=1`. 소유자 컨테이너는 변하지 않음 |
+
+설정 키(모두 기본 꺼짐 또는 안전한 값):
+
+| 파일 | 키 | 기본 | 설명 |
+|---|---|---|---|
+| 매니저 `manager.toml` | `[session] spot-slot-suffix` | `""` | 예 `"-spot.shares"`. 스케줄러와 DB 쪽 동작을 켬. 매니저 재시작 필요 |
+| agent `agent.toml` | `[resource] spot-slot-suffix` | `""` | 매니저와 같은 값. agent 쪽 동작을 켬. agent 재시작 필요 |
+| agent `agent.toml` | `[resource] spot-overcommit-factor` | `4` | 스팟이 장부에서 잡을 수 있는 CPU(코어당)·RAM 배수 |
+| agent `agent.toml` | `[resource] spot-cgroup-parent` | `""` | 스팟 컨테이너의 Docker `CgroupParent`. 예 `"spot.slice"` |
+
+알려진 한계와 주의:
+- 한 노드에서 `spot-slot-suffix`를 켜기 전에 이미 떠 있던 컨테이너는 라벨이 없어 소유자 맵으로 복원됩니다(켠 뒤 만든 스팟부터 적용).
+- 하드 메모리 한도가 없어 스팟이 메모리를 많이 쓰면 상위 cgroup `MemoryMax` 또는 노드 OOM(스팟이 `OomScoreAdj` 1000이라 먼저 죽음)에 의존합니다. 스왑을 막으려면 `spot.slice`에 `MemorySwapMax=0`을 둡니다(아래).
+- 스팟 세션 수 한도는 여전히 2.16.5(`overcommit_max_sessions`)이고, cpu·mem 슬롯은 더 이상 막지 않습니다.
+- `agent_resources`의 cpu·mem은 소유자만 반영하므로 WebUI 자원 그룹 현황 합계에 스팟 CPU·RAM은 들어가지 않습니다(요청값은 세션 상세에 보임).
+
+##### 스팟 풀 상위 cgroup (systemd slice) 수동 설정
+
+노드마다 한 번. 값은 노드에 맞게 바꿉니다(풀 크기 = 스팟에 내줄 몫).
+
+```bash
+sudo tee /etc/systemd/system/spot.slice >/dev/null <<'UNIT'
+[Unit]
+Description=Backend.AI spot pool (shared CPU/RAM for spot sessions)
+
+[Slice]
+# 소유자보다 항상 낮은 우선순위: 기본 100, 스팟은 10
+CPUWeight=10
+# 풀이 쓸 수 있는 최대 CPU(코어 수 x 100%)와 RAM
+CPUQuota=800%
+MemoryHigh=30G
+MemoryMax=32G
+MemorySwapMax=0
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl start spot.slice
+systemctl status spot.slice --no-pager
+```
+
+켜는 순서: (1) 위 slice 생성, (2) `manager.toml`에 `[session] spot-slot-suffix = "-spot.shares"`, (3) `agent.toml`의 `[resource]`에 `spot-slot-suffix = "-spot.shares"`, `spot-overcommit-factor = 4`, `spot-cgroup-parent = "spot.slice"`, (4) manager와 agent 재시작, (5) 새 스팟 세션을 만들어 `docker inspect`로 `CpuShares`, `MemoryReservation`, `OomScoreAdj`, `CgroupParent`, 라벨 `ai.backend.spot`을 확인. 끄려면 두 접미사를 비우고 재시작(이미 떠 있는 스팟은 라벨이 남아 계속 스팟 맵으로 복원됨).
 
 #### 2.16.4 GPU: 몫을 미리 잡지 않고 먼저 쓰는 쪽이 가짐
 
@@ -953,7 +1005,8 @@ mem_floor_gib = 8            # 노드 MemAvailable이 이 값 밑으로 떨어�
 | 2.16 스팟 CPU·RAM 풀: 상위 cgroup(`CgroupParent`)과 `cpu.max`·`cpu.weight`로 풀 총량 제한과 세션별 나눔, 소유자 cgroup은 영향 없음 | UNVERIFIED (네이티브 Linux 필요, 설계만) |
 | 2.16 스팟 RAM: `MemoryReservation` 소프트 한도 + `OomScoreAdj` 최대로 노드 메모리 부족 시 스팟이 먼저 죽고 소유자는 영향 없음 | UNVERIFIED |
 | 2.16 플러그인 도커 인자(`CgroupParent`, `OomScoreAdj`, `CpuShares`)가 코어 CPU 플러그인의 cpuset과 충돌 없이 컨테이너에 적용됨 | UNVERIFIED |
-| 2.16 초과 배정: 풀 명목 크기를 넘는 스팟 세션을 매니저가 거절하지 않고 만듦(cpu·mem 슬롯 예약 문제) | UNVERIFIED. 코어 변경이 필요할 수 있음(4절) |
+| 2.16 초과 배정: 풀 명목 크기를 넘는 스팟 세션을 매니저가 거절하지 않고 만듦(cpu·mem 슬롯 예약 문제) | 코어 변경 구현됨(2.16.3, 포크 `bai/`). 배치 필터, 트래커, DB 보유량 건너뛰기, agent 할당 맵, 컨테이너 인자 재작성은 단위 테스트로 확인. 실제 매니저+agent+Postgres 흐름과 `agent_resources` 값은 UNVERIFIED(26.8.3 E2E 필요) |
+| 2.16.3 코어 변경: 스팟 컨테이너가 `spot.slice` 아래에서 `CpuShares`, `MemoryReservation`, `OomScoreAdj=1000`으로 뜨고 소유자 컨테이너는 변하지 않음, agent 재시작 뒤 라벨로 맞는 할당 맵에 복원됨 | 인자 재작성과 맵 선택은 단위 테스트로 확인. Docker 데몬 적용, 재시작 복원, 실제 OOM 순서는 UNVERIFIED (네이티브 Linux) |
 | 2.16.4 GPU 미예약: 빈 스팟이 몫을 세지 않고, 먼저 쓰기 시작한 스팟이 GPU를 받고 나머지는 `parked`로 기다리다 2.15 재개 신호로 이어짐 | 구현됨(`pool.enabled`), 배치 논리는 단위 테스트(`tests/test_spot_pool.py`)로 확인. 실기는 UNVERIFIED |
 | 2.16.4 GPU를 쓰지 않는 스팟은 주인 복귀·풀 압박·GPU 부족 어느 경우에도 감시기가 컨테이너를 끝내지 않음 | 단위 테스트로 확인(계획이 `Rehome` 외에는 아무 동작도 내지 않음, 소스에 stop/kill/rm 없음). 실기는 UNVERIFIED |
 | 2.16.5 풀 모드 슬롯: 주인이 모든 GPU를 써도 `overcommit_max_sessions`만큼 스팟 세션을 매니저가 받음, 할당 맵 용량이 같음 | 플러그인 단위·통합 테스트로 확인(Backend.AI 26.8.3 소스). 매니저 실제 스케줄링은 UNVERIFIED |
@@ -969,11 +1022,7 @@ mem_floor_gib = 8            # 노드 MemAvailable이 이 값 밑으로 떨어�
 - 소유자가 GPU 메모리를 크게 잡은 채 쉬는 경우(예: 70GB 모델 상주) 빌려줄 여유가 거의 없습니다.
   이런 GPU를 대시보드로 보여 주고 정책(세션 정리 권고)으로 풀지 결정해야 합니다.
 - 크레딧: 빌려준 GPU 시간의 소유자별 집계와 우선순위 반영은 아직 없습니다.
-- **스팟 공유 풀 초과 배정과 코어(2.16).** 사용자가 2026-10-24에 정한 "풀 크기를 넘는 스팟 세션 생성"은 매니저가
-  세션 생성 때 `cpu`·`mem` 슬롯을 노드 용량에서 예약하는 한 플러그인만으로 되지 않을 수 있습니다. 후보는 (a) 스팟 세션의
-  cpu·mem 슬롯을 노드 용량에서 빼지 않거나 별도 풀 용량에서 빼는 스케줄러 변경, (b) 코어 CPU 플러그인이 세션마다 코어를 고정하는
-  동작을 스팟에 한해 풀 공유로 바꾸는 변경, (c) 스팟 전용 agent 하나 더(설정만, 초과 배정은 불가). 코어는 패치하지 않으며,
-  사용자가 코어 수정을 승인하면 그때 설계합니다. 먼저 네이티브 노드에서 (b)가 정말 필요한지 확인해야 합니다.
+- **스팟 공유 풀 초과 배정과 코어(2.16).** 사용자 승인(2026-10-24)으로 후보 (a)(스팟 cpu·mem을 노드 예약에서 뺌)와 (b)(스팟은 코어 고정 대신 공유)를 포크 `bai/`에 구현했습니다(2.16.3 "코어 변경", 기본 꺼짐). 남은 일: 26.8.3 E2E와 네이티브 Linux에서 실제 확인, 업스트림 병합 때 충돌 점검(`db_source.py`, `resources.py`, `docker/agent.py`), 기존 컨테이너에 라벨이 없는 문제, 하드 메모리 한도가 없는 스팟의 노드 OOM 순서. (c)(스팟 전용 agent)는 쓰지 않음.
 - **`available_slots`와 소수 몫.** (플러그인 쪽은 `overcommit_max_sessions`를 용량으로 보고하도록 구현함, 2.16.5. 몫이 작은 세션은 그 수를 넘게 만들어지는 한계가 남음.) 2.16.5처럼 GPU 몫을 예약하지 않으면 스팟 슬롯 용량을 무엇으로 보고해야 매니저가 세션 수를
   GPU 장수 이상으로 허용하는지 정해야 합니다(슬롯 이름 `.shares`는 WebUI 소수 입력 때문에 유지).
 - **풀 안 메모리 부족 시 스팟 간 OOM.** 풀을 넘어 쓰는 스팟끼리는 커널 OOM으로 죽을 수 있고, 이는 "GPU 안 쓰는 스팟은 정리하지
