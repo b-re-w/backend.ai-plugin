@@ -652,6 +652,20 @@ def test_device_files_are_gated_and_follow_moves(tmp_path):
     assert c.gated[SPOT] == f"GPU-{dst}" and not any(x[0] == "gate" for x in ck.calls[4:])
 
 
+def test_restart_without_parked_record_keeps_devices_closed_while_the_owner_uses_the_gpu(tmp_path):
+    # A session that lost its GPU looks new after a monitor restart (lost_gpu is in memory only,
+    # parked.json is empty). Its assigned GPU is busy with its owner: nothing may be opened.
+    OWNER, SPOT = "o" * 64, "s" * 64
+    procs = {0: [(10, 4 * GiB, 90, OWNER)]}  # owner active on the spot's assigned GPU-0
+    c, fake, ck = make_controller(tmp_path, procs)
+    c.minors = {"GPU-0": 0, "GPU-1": 1, "GPU-2": 2}
+    c.tick(0)
+    assert c.last_verdicts["GPU-0"].state is GpuState.BUSY
+    assert ck.calls == [("gate", (), (0, 1, 2))]
+    c.tick(5)
+    assert len(ck.calls) == 1 and c.gated[SPOT] == ""
+
+
 def test_parked_session_gets_no_device_and_failed_restore_closes_the_target(tmp_path):
     from labgpu.spot.ckpt import CheckpointError
 

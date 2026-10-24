@@ -35,7 +35,7 @@ from .config import Config
 from .detector import GpuTracker
 from .docker import DockerError, OwnerContainer, SpotContainer
 from .hostinfo import CpuSampler
-from .model import GpuObservation, GpuVerdict, ProcKind
+from .model import GpuObservation, GpuState, GpuVerdict, ProcKind
 from .observer import observe
 from .placement import (
     Action,
@@ -511,13 +511,24 @@ class Controller:
         either: its old `assigned` GPU may be the one the owner reclaimed, so every device stays
         closed until a Rehome opens its destination.
         """
+        on_gpu = {c for o in self.last_obs.values() for c in o.spot_containers}
         for s in spots:
             gpu = "" if s.id in self.parked or s.id in self.lost_gpu else self.assigned.get(s.id)
+            if gpu and s.id not in on_gpu and s.id not in self.held and not self._may_open(gpu):
+                # No GPU process, and its GPU is the owner's right now (or unknown). `lost_gpu` is
+                # in memory only, so after a monitor restart a session that lost its GPU looks new:
+                # open nothing until a Rehome, Restore, or Move places it, or the GPU is free.
+                gpu = ""
             if gpu is None or self.gated.get(s.id) == gpu or s.id in self.busy:
                 continue
             allow = [gpu] if gpu else []
             others = [u for u in s.uuids if u != gpu]
             self._submit(Gate(s.id, gpu), lambda s=s, allow=allow, others=others: self._gate(s.id, allow, others), None, None)
+
+    def _may_open(self, gpu: str) -> bool:
+        """Whether a session with no GPU process may have this GPU's device file opened (fail safe)."""
+        v = self.last_verdicts.get(gpu)
+        return v is not None and not v.must_reclaim and v.state in (GpuState.IDLE, GpuState.LENDABLE, GpuState.LENT)
 
     def _cap(self, cid: str, uuid: str) -> int:
         """Memory limit for a session on `uuid`: its share of the GPU's spot capacity (SPEC 2.12)."""
