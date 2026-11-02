@@ -4,6 +4,7 @@
 #
 #   Primary:   PRO 5000 72GB (0), PRO 6000 x2 (1, 2), A6000 (3)
 #   Secondary: PRO 5000 48GB x4 (0-3)
+#   i-B300-TMP (temporary, ~1 month): B300 SXM6 x8
 #
 # The etcd config is shared by every agent; each plugin only takes GPUs matching its pattern,
 # so the same settings work on both servers. Then, on every GPU node's agent.toml:
@@ -13,7 +14,7 @@
 #   block-compute-plugins = ["labgpu.accelerator.cuda_frac"]
 #   [resource]
 #   allocation-order = ["cuda-pro6000", "cuda-pro6000-spot", "cuda-pro5000-72", "cuda-pro5000-72-spot", "cuda-pro5000", "cuda-pro5000-spot",
-#                       "cuda-a6000", "cuda-a6000-spot", "cpu", "mem"]
+#                       "cuda-a6000", "cuda-a6000-spot", "cuda-b300", "cuda-b300-spot", "cpu", "mem"]
 #
 # Kernel images need no relabeling: the keys start with "cuda" (SPEC 1.11).
 #
@@ -46,6 +47,7 @@ slot gpu_slot_1 cuda-pro6000  "*PRO 6000*" "PRO 6000"      PRO6000
 slot gpu_slot_2 cuda-pro5000-72 "*PRO 5000*" "PRO 5000 72GB" PRO5000-72 60g
 slot gpu_slot_3 cuda-pro5000  "*PRO 5000*" "PRO 5000"      PRO5000    "" 60g
 slot gpu_slot_4 cuda-a6000    "*A6000*"    "A6000"         A6000
+slot gpu_slot_5 cuda-b300     "*B300*"     "B300"          B300
 
 # Spot launch mode (SPEC 2.12): one gpu_spot_N per model, same GPU selection as its owner slot;
 # the slot is a fractional share of one GPU (<key>.shares).
@@ -67,6 +69,7 @@ spot gpu_spot_1 cuda-pro6000-spot    "*PRO 6000*" PRO6000-SPOT    "PRO 6000 Spot
 spot gpu_spot_2 cuda-pro5000-72-spot "*PRO 5000*" PRO5000-72-SPOT "PRO 5000 72GB Spot" 60g
 spot gpu_spot_3 cuda-pro5000-spot    "*PRO 5000*" PRO5000-SPOT    "PRO 5000 Spot" "" 60g
 spot gpu_spot_4 cuda-a6000-spot      "*A6000*"    A6000-SPOT      "A6000 Spot"
+spot gpu_spot_5 cuda-b300-spot       "*B300*"     B300-SPOT       "B300 Spot"
 
 $BAI mgr etcd get --prefix "$P"
 

@@ -1,7 +1,7 @@
 """
 Spot launch mode as Backend.AI accelerator plugins (SPEC 2.12).
 
-`gpu_spot_1..4` each offer `<key>.shares` for one GPU model, e.g. `cuda-pro6000-spot.shares`. A
+`gpu_spot_1..5` each offer `<key>.shares` for one GPU model, e.g. `cuda-pro6000-spot.shares`. A
 spot session is a normal Backend.AI session that requests a share of one GPU (0 < share <= 1) from
 the WebUI session launcher; several spot sessions can share a GPU up to a total of 1. The slot
 capacity is the number of GPUs of that model the idleness monitor currently judges lendable or
@@ -539,3 +539,7 @@ class SpotSlotPlugin3(LabGpuSpotPlugin):
 
 class SpotSlotPlugin4(LabGpuSpotPlugin):
     entry_name = "gpu_spot_4"
+
+
+class SpotSlotPlugin5(LabGpuSpotPlugin):
+    entry_name = "gpu_spot_5"

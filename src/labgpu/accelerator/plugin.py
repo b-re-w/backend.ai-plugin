@@ -2,7 +2,7 @@
 Backend.AI accelerator plugins exposing CUDA GPUs as fractional `<key>.shares`, enforced by
 HAMi-core (SPEC section 1).
 
-`cuda_frac` takes every GPU under the key `cuda`; `gpu_slot_1..4` each take the GPUs matching
+`cuda_frac` takes every GPU under the key `cuda`; `gpu_slot_1..5` each take the GPUs matching
 a model pattern under a configured key, so one agent can offer one slot per GPU model (SPEC 1.11).
 
 Only this module imports `ai.backend.*`; all arithmetic lives in `labgpu.fraction`.
@@ -636,6 +636,10 @@ class GpuSlotPlugin3(LabGpuPlugin):
 
 class GpuSlotPlugin4(LabGpuPlugin):
     entry_name = "gpu_slot_4"
+
+
+class GpuSlotPlugin5(LabGpuPlugin):
+    entry_name = "gpu_slot_5"
 
 
 def short_model_name(model: str) -> str:

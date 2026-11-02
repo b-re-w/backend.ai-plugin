@@ -82,3 +82,35 @@ def test_key_label_is_node_independent():
     assert key_label("cuda-pro5000-72-spot") == "PRO5000-72"
     assert key_label("cuda-pro5000-spot") == "PRO5000"
     assert key_label("cuda-a6000") == "A6000"
+
+
+def test_b300_model_matching_and_labels():
+    # SPEC 1.11.1: "*B300*" must pick every plausible NVML name and nothing else.
+    for name in ("NVIDIA B300 SXM6 AC", "NVIDIA B300", "NVIDIA B300 SXM6"):
+        assert model_matches(name, ("*B300*",))
+    for name in ("NVIDIA RTX PRO 6000 Blackwell", "NVIDIA RTX PRO 5000 Blackwell", "NVIDIA RTX A6000"):
+        assert not model_matches(name, ("*B300*",))
+    for pattern in ("*PRO 6000*", "*PRO 5000*", "*A6000*"):
+        assert not model_matches("NVIDIA B300 SXM6 AC", (pattern,))
+    assert validate_key("cuda-b300") == "cuda-b300" and validate_key("cuda-b300-spot")
+    assert key_label("cuda-b300") == "B300" and key_label("cuda-b300-spot") == "B300"
+    selector = GpuSelector.from_config({"model_pattern": "*B300*"})
+    assert selector.matches("NVIDIA B300 SXM6 AC", 275 * GiB)
+
+
+def test_entry_points_cover_slot_and_spot_5():
+    import tomllib
+    from pathlib import Path
+
+    eps = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["entry-points"]["backendai_accelerator_v21"]
+    assert eps["gpu_slot_5"] == "labgpu.accelerator.gpu_slot:GpuSlotPlugin5"
+    assert eps["gpu_spot_5"] == "labgpu.accelerator.gpu_spot:SpotSlotPlugin5"
+    # Source text only: the plugin modules need ai.backend.* to import (pure tests must not).
+    accelerator = Path(__file__).parent.parent / "src" / "labgpu" / "accelerator"
+    assert 'class GpuSlotPlugin5(LabGpuPlugin):\n    entry_name = "gpu_slot_5"' in (
+        accelerator / "plugin.py").read_text(encoding="utf-8")
+    assert 'class SpotSlotPlugin5(LabGpuSpotPlugin):\n    entry_name = "gpu_spot_5"' in (
+        accelerator / "spot_plugin.py").read_text(encoding="utf-8")
+    assert "GpuSlotPlugin5" in (accelerator / "gpu_slot.py").read_text(encoding="utf-8")
+    assert "SpotSlotPlugin5" in (accelerator / "gpu_spot.py").read_text(encoding="utf-8")

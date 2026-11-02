@@ -32,7 +32,7 @@
 - 엔트리 포인트 그룹 `backendai_accelerator_v21`에 두 종류를 등록합니다.
   - **`cuda_frac`** → `CUDAFracPlugin`. `key` 기본값 **`cuda`**. 노드의 GPU가 모두 같은 종류일 때 씁니다.
     WebUI가 `cuda.shares`를 fGPU로 인식합니다.
-  - **`gpu_slot_1` ~ `gpu_slot_4`** → `GpuSlotPlugin1~4`. GPU 종류별 슬롯용입니다(1.11). `key` 설정이 없으면
+  - **`gpu_slot_1` ~ `gpu_slot_5`** → `GpuSlotPlugin1~5`. GPU 종류별 슬롯용입니다(1.11). `key` 설정이 없으면
     `init()`에서 예외를 내고, agent는 그 플러그인을 로그만 남기고 건너뜁니다.
 - 같은 에이전트에서 오픈소스 `cuda` 플러그인과 함께 쓸 수 없습니다. `agent.toml`에서 막습니다.
   **주의:** `allow-`/`block-compute-plugins`는 엔트리 포인트 이름이 아니라 **모듈 경로 접두사**로 맞춥니다
@@ -192,6 +192,27 @@ CPU·RAM은 agent 하나가 관리하므로 종류와 상관없이 유동적으�
   고치지 않아도 모든 종류와 스팟이 보입니다. 매니저는 이 라벨로 세션 생성을 막지 않습니다. WebUI가
   `cuda`를 특별 취급하는 곳은 슬롯 이름이 정확히 `cuda.device`, `cuda.shares`일 때뿐이라 영향이 없고,
   런처에 보이는 이름은 `display_name`, `display_unit`입니다.
+
+#### 1.11.1 B300 임시 서버 (`i-B300-TMP`)
+
+약 1개월 동안 연구실 클러스터에 합류하는 임시 서버입니다. NVIDIA B300 SXM6 8장(장당 약 275GB), 드라이버 580 /
+CUDA 13입니다. 기존 종류와 똑같은 방식으로 종류 하나를 더 등록합니다. 코드 구조는 바뀌지 않습니다.
+
+| 항목 | 값 |
+|---|---|
+| 주인 슬롯 | 엔트리 포인트 `gpu_slot_5`, key `cuda-b300`, 슬롯 `cuda-b300.shares` (HAMi-core가 없어 장 단위로 돌아가면 `cuda-b300.device`, 1.5) |
+| 스팟 슬롯 | 엔트리 포인트 `gpu_spot_5`, key `cuda-b300-spot`, 슬롯 `cuda-b300-spot.shares` |
+| 모델 매칭 | `model_pattern = "*B300*"` (대소문자 무시). NVML 이름이 `NVIDIA B300 SXM6 AC`, `NVIDIA B300` 등 무엇이든 맞고, 기존 패턴(`*PRO 6000*`, `*PRO 5000*`, `*A6000*`)과 겹치지 않습니다. 메모리 경계(`min_memory`/`max_memory`)는 두지 않습니다(이 종류는 한 가지뿐). |
+| 표시 | 주인 `display_name` "B300", `display_unit` `B300`. 스팟 `display_name` "B300 Spot", `display_unit` `B300-SPOT`. 설정이 없어도 key에서 같은 이름이 나옵니다(`key_label`). |
+| `device_name` | 플러그인 key와 같습니다(`cuda-b300`). 코드가 그렇게 채우므로 운영자가 할 일은 없습니다. |
+| agent 설정 | `[resource] allocation-order`에 `cuda-b300`, `cuda-b300-spot` 추가(README 3-1 참고). 빠지면 이 종류 세션만 만들어지지 않습니다. |
+| WebUI | 수정 없음. `cuda-` 접두어 규칙(1.11)과 `labAcceleratorGroups`가 슬롯 이름에서 모델을 뽑으므로 새 종류가 자동으로 나옵니다. 서버(리소스 그룹) 배치는 매니저의 scaling group 설정을 따릅니다. |
+| 스팟 대여 | 다른 종류와 같은 설정 경로입니다. `monitor_enabled` 기본값(`true`)과 감시기 기본값을 그대로 둡니다. 이 서버에서 켤지 끌지는 운영자가 정합니다(`monitor_enabled = "false"` 또는 노드별 설정, 2.13). 이 변경이 정한 것이 아닙니다. |
+
+B300에서 확인되지 않은 것(3.2 표 참고): HAMi-core(`libvgpu.so`)가 Blackwell Ultra(B300, 드라이버 580 / CUDA 13)에서
+메모리·SM을 실제로 제한하는지, cuda-checkpoint가 B300과 8장 SXM 구성(NVLink/NVSwitch)에서 옮기기에 성공하는지,
+NVML의 프로세스별 정보와 PID 매핑이 이 서버에서 나오는지. 확인 전에는 fGPU 소수 할당과 스팟 옮기기를 믿지 않습니다.
+HAMi-core가 동작하지 않으면 1.5대로 ERROR를 남기고 장 단위로 돌아가며, 스팟 플러그인은 꺼집니다(스팟 자리 0).
 
 ### 1.13 세션별 GPU 대여 통계
 
@@ -465,7 +486,7 @@ OOM 오류로 한도를 1MiB로 낮춘 세션(`limited`).
 
 > 2026-10-24 결정으로 스팟 CPU·RAM 풀, GPU 몫 미예약, GPU 안 쓰는 스팟은 정리하지 않음 정책이 2.16에 추가되었습니다. 규칙 1-1은 2.16.4가 대체합니다. **구현됨(GPU 쪽과 슬롯 보고): `monitor/pool/enabled = "true"`인 노드에서만 적용되고, 꺼져 있으면(기본) 이 절의 동작 그대로입니다.**
 
-**Backend.AI 쪽 (`gpu_spot_1..4` 플러그인, `labgpu.accelerator.spot_plugin`)**
+**Backend.AI 쪽 (`gpu_spot_1..5` 플러그인, `labgpu.accelerator.spot_plugin`)**
 
 - 각 플러그인은 GPU 종류 하나를 맡아 `<key>.shares` 슬롯을 냅니다(예: key `cuda-pro6000-spot` →
   `cuda-pro6000-spot.shares`). **소수로 요청할 수 있습니다**(사용자 결정, 0.01 단위). 세션 하나가 받는 양 `s`는
@@ -1012,6 +1033,17 @@ systemctl status spot.slice --no-pager
 | 2.16.5 풀 모드 슬롯: 주인이 모든 GPU를 써도 `overcommit_max_sessions`만큼 스팟 세션을 매니저가 받음, 할당 맵 용량이 같음 | 플러그인 단위·통합 테스트로 확인(Backend.AI 26.8.3 소스). 매니저 실제 스케줄링은 UNVERIFIED |
 | 2.16 메모리 바닥(`mem_floor_gib`) 밑에서 새 GPU 배정(`Rehome`, `Restore`)만 멈추고 아무것도 정리하지 않음 | 단위 테스트로 확인. 실기 UNVERIFIED |
 | 2.16.4 시작 GPU를 받을 수 없는 상태(주인 사용)에서 장치 파일이 닫힌 채 만들어진 스팟이 `Rehome`으로 열림 | UNVERIFIED (실기) |
+
+B300 임시 서버(`i-B300-TMP`, 1.11.1) 추가분. 개발 환경에는 B300이 없어 아래는 모두 실기 확인 전입니다.
+
+| 항목 | 상태 |
+|---|---|
+| `*B300*` 패턴이 B300 NVML 이름(`NVIDIA B300 SXM6 AC` 등)을 고르고 다른 종류와 겹치지 않음, 키·표시 이름 규칙 | 단위 테스트로 확인 (`tests/test_selection.py`, 가짜 이름). 실제 NVML 이름은 UNVERIFIED |
+| `gpu_slot_5`, `gpu_spot_5`가 엔트리 포인트로 올라오고 `cuda-b300.shares`, `cuda-b300-spot.shares`를 보고, 매니저 `resource_slot_types`에 등록됨 | UNVERIFIED (실기, 이 서버에서 agent 재시작 뒤 로그와 `agents.available_slots`로 확인) |
+| B300 8장에서 HAMi-core 메모리·SM 제한 (`mode=fractional enforced=True`) | UNVERIFIED (HAMi-core가 Blackwell Ultra, 드라이버 580 / CUDA 13에서 도는지 모름) |
+| B300에서 cuda-checkpoint로 옮기기 (SXM6 8장, NVLink/NVSwitch 구성) | UNVERIFIED |
+| B300 NVML 프로세스별 사용량, PID에서 컨테이너 매핑, 감시기 판정 | UNVERIFIED |
+| 스팟 대여를 B300 서버에서 켜기 | 정하지 않음 (기본값 그대로, 운영자 결정) |
 
 ## 4. 열린 질문
 
