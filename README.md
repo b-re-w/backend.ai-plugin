@@ -101,9 +101,9 @@ Primary처럼 PRO 6000·PRO 5000 72GB·A6000이 섞인 서버를 agent 하나로
 
 3. agent를 재시작하고 로그에서 `[gpu_slot_N] labgpu ...: key=... devices=[...]`를 확인합니다.
    Secondary처럼 해당 종류가 없는 노드에서는 그 슬롯이 0으로 보고됩니다.
-   - **B300 임시 서버(`i-B300-TMP`, SPEC 1.11.1)** 의 `agent.toml`에는 스팟 key까지 넣습니다:
-     `allocation-order = ["cuda-pro6000", "cuda-pro6000-spot", "cuda-pro5000-72", "cuda-pro5000-72-spot", "cuda-pro5000", "cuda-pro5000-spot", "cuda-a6000", "cuda-a6000-spot", "cuda-b300", "cuda-b300-spot", "cpu", "mem"]`
-     (B300 외 종류는 그 서버에 없어 0으로 보고됩니다). B300 슬롯의 etcd 설정은 `scripts/register_slots.sh`에 이미 들어 있습니다.
+   - **B300 임시 서버(`i-B300-TMP`, SPEC 1.11.1)** 는 reserved 전용입니다(스팟 대여 안 함). 스팟 key는 넣지 않고 `gpu_spot_5`는 etcd에 등록하지 않습니다:
+     `allocation-order = ["cuda-b300", "cpu", "mem"]`
+     (`allow-compute-plugins`/`block-compute-plugins`는 위 예시 그대로). B300 슬롯의 etcd 설정은 `scripts/register_slots.sh`에 이미 들어 있습니다.
      HAMi-core와 cuda-checkpoint의 B300 동작은 아직 확인 전입니다(SPEC 3.2).
 4. 자원 정책·프리셋을 종류별 슬롯으로 바꿉니다. key를 `cuda-`로 시작하게 지으면 이미지 라벨을 고칠 필요가 없습니다(SPEC 1.11).
 
